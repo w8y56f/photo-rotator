@@ -1,5 +1,7 @@
 # 照片逆时针旋转
 
+[English](README.en.md)
+
 一款轻量 Android 应用，从系统照片选择器选择一张或多张图片，逆时针旋转 90° 并保存到 `Pictures/PhotoRotator`。原图始终保留。
 
 ## 功能

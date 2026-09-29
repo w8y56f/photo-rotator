@@ -1,5 +1,7 @@
 # Photo Rotator
 
+[简体中文](README.md)
+
 A lightweight Android app that lets you select one or more photos in the system photo picker, rotate them 90° counterclockwise, and save copies to `Pictures/PhotoRotator`. Originals are kept unchanged.
 
 ## Features
