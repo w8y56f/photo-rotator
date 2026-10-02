@@ -2,9 +2,12 @@ package dev.stone.photorotator;
 
 import android.content.ContentResolver;
 import android.content.ContentValues;
-import android.content.Context;
 import android.content.ContentUris;
+import android.content.Context;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
@@ -16,78 +19,55 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.UUID;
 import java.util.List;
+import java.util.UUID;
 
-/** Makes a new photo whose pixels are untouched and whose EXIF orientation is rotated. */
+/** Rotates the image pixels and carries the source EXIF into the new photo. */
 final class ExifRotation {
     private ExifRotation() { }
 
-    static Uri saveCopy(Context context, Uri source) throws Exception {
-        ContentResolver resolver = context.getContentResolver();
-        Uri mediaUri = resolveLocalMediaUri(resolver, source);
-        String mime = resolver.getType(mediaUri);
-        String extension;
-        if ("image/jpeg".equalsIgnoreCase(mime) || "image/jpg".equalsIgnoreCase(mime)) {
-            mime = "image/jpeg";
-            extension = ".jpg";
-        } else if ("image/png".equalsIgnoreCase(mime)) {
-            extension = ".png";
-        } else if ("image/webp".equalsIgnoreCase(mime)) {
-            extension = ".webp";
-        } else {
-            throw new IllegalArgumentException("保留 EXIF 模式只支持 JPEG、PNG、WebP；此照片请使用普通旋转");
-        }
+    private static final String[] COPIED_TAGS = {
+            ExifInterface.TAG_DATETIME, ExifInterface.TAG_DATETIME_ORIGINAL,
+            ExifInterface.TAG_DATETIME_DIGITIZED, ExifInterface.TAG_OFFSET_TIME,
+            ExifInterface.TAG_OFFSET_TIME_ORIGINAL, ExifInterface.TAG_OFFSET_TIME_DIGITIZED,
+            ExifInterface.TAG_SUBSEC_TIME, ExifInterface.TAG_SUBSEC_TIME_ORIGINAL,
+            ExifInterface.TAG_SUBSEC_TIME_DIGITIZED, ExifInterface.TAG_MAKE,
+            ExifInterface.TAG_MODEL, ExifInterface.TAG_SOFTWARE,
+            ExifInterface.TAG_ARTIST, ExifInterface.TAG_COPYRIGHT,
+            ExifInterface.TAG_IMAGE_DESCRIPTION, ExifInterface.TAG_USER_COMMENT,
+            ExifInterface.TAG_EXPOSURE_TIME, ExifInterface.TAG_F_NUMBER,
+            ExifInterface.TAG_EXPOSURE_PROGRAM, ExifInterface.TAG_ISO_SPEED_RATINGS,
+            ExifInterface.TAG_SHUTTER_SPEED_VALUE, ExifInterface.TAG_APERTURE_VALUE,
+            ExifInterface.TAG_BRIGHTNESS_VALUE, ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
+            ExifInterface.TAG_METERING_MODE, ExifInterface.TAG_LIGHT_SOURCE,
+            ExifInterface.TAG_FLASH, ExifInterface.TAG_FOCAL_LENGTH,
+            ExifInterface.TAG_WHITE_BALANCE, ExifInterface.TAG_EXPOSURE_MODE,
+            ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
+            ExifInterface.TAG_LENS_MAKE, ExifInterface.TAG_LENS_MODEL,
+            ExifInterface.TAG_BODY_SERIAL_NUMBER, ExifInterface.TAG_LENS_SERIAL_NUMBER,
+            ExifInterface.TAG_GPS_VERSION_ID, ExifInterface.TAG_GPS_LATITUDE,
+            ExifInterface.TAG_GPS_LATITUDE_REF, ExifInterface.TAG_GPS_LONGITUDE,
+            ExifInterface.TAG_GPS_LONGITUDE_REF, ExifInterface.TAG_GPS_ALTITUDE,
+            ExifInterface.TAG_GPS_ALTITUDE_REF, ExifInterface.TAG_GPS_TIMESTAMP,
+            ExifInterface.TAG_GPS_DATESTAMP, ExifInterface.TAG_GPS_PROCESSING_METHOD,
+            ExifInterface.TAG_GPS_SPEED, ExifInterface.TAG_GPS_SPEED_REF,
+            ExifInterface.TAG_GPS_IMG_DIRECTION, ExifInterface.TAG_GPS_IMG_DIRECTION_REF
+    };
 
-        File temporary = File.createTempFile("photo-rotator-", extension, context.getCacheDir());
+    static Uri saveCopy(Context context, Uri source, int rotationDegrees) throws Exception {
+        ContentResolver resolver = context.getContentResolver();
+        PreparedPhoto prepared = prepare(context, source, rotationDegrees);
         Uri destination = null;
         try {
-            // Picker URIs are always redacted on some Android versions. Query the
-            // original MediaStore item after the user grants media access.
-            Uri original = MediaStore.setRequireOriginal(mediaUri);
-            try (ParcelFileDescriptor descriptor = resolver.openFileDescriptor(original, "r")) {
-                if (descriptor == null) throw new IllegalStateException("无法读取照片原始文件");
-                try (InputStream input = new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
-                 OutputStream output = new FileOutputStream(temporary)) {
-                    byte[] buffer = new byte[64 * 1024];
-                    int length;
-                    while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
-                }
-            } catch (java.io.IOException | UnsupportedOperationException | SecurityException e) {
-                throw new IllegalStateException("系统未提供包含定位信息的原始照片，未生成副本", e);
-            }
-
-            ExifInterface exif = new ExifInterface(temporary);
-            String[] retainedTags = {
-                    ExifInterface.TAG_GPS_LATITUDE, ExifInterface.TAG_GPS_LATITUDE_REF,
-                    ExifInterface.TAG_GPS_LONGITUDE, ExifInterface.TAG_GPS_LONGITUDE_REF,
-                    ExifInterface.TAG_GPS_ALTITUDE, ExifInterface.TAG_GPS_ALTITUDE_REF,
-                    ExifInterface.TAG_GPS_TIMESTAMP, ExifInterface.TAG_GPS_DATESTAMP,
-                    ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL,
-                    ExifInterface.TAG_DATETIME_ORIGINAL
-            };
-            String[] originalValues = new String[retainedTags.length];
-            for (int i = 0; i < retainedTags.length; i++) {
-                originalValues[i] = exif.getAttribute(retainedTags[i]);
-            }
-            exif.rotate(-90);
-            exif.saveAttributes();
-            ExifInterface verified = new ExifInterface(temporary);
-            for (int i = 0; i < retainedTags.length; i++) {
-                if (!java.util.Objects.equals(originalValues[i], verified.getAttribute(retainedTags[i]))) {
-                    throw new IllegalStateException("照片的地址或拍摄信息无法完整保留，未生成副本");
-                }
-            }
-
             ContentValues values = new ContentValues();
-            values.put(MediaStore.Images.Media.DISPLAY_NAME, "Rotated_EXIF_" + UUID.randomUUID() + extension);
-            values.put(MediaStore.Images.Media.MIME_TYPE, mime);
+            values.put(MediaStore.Images.Media.DISPLAY_NAME, "Rotated_" + UUID.randomUUID() + prepared.extension);
+            values.put(MediaStore.Images.Media.MIME_TYPE, prepared.mime);
             values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PhotoRotator");
             values.put(MediaStore.Images.Media.IS_PENDING, 1);
             destination = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
             if (destination == null) throw new IllegalStateException("无法创建照片副本");
 
-            try (InputStream input = new FileInputStream(temporary);
+            try (InputStream input = new FileInputStream(prepared.rotatedFile);
                  OutputStream output = resolver.openOutputStream(destination, "wt")) {
                 if (output == null) throw new IllegalStateException("无法写入照片副本");
                 byte[] buffer = new byte[64 * 1024];
@@ -109,8 +89,170 @@ final class ExifRotation {
             }
             throw e;
         } finally {
-            // A failed deletion only leaves a private cache file; Android may clear it later.
-            temporary.delete();
+            prepared.cleanup();
+        }
+    }
+
+    static void overwrite(Context context, Uri source, int rotationDegrees) throws Exception {
+        PreparedPhoto prepared = prepare(context, source, rotationDegrees);
+        ContentResolver resolver = context.getContentResolver();
+        Uri writeTarget = prepared.mediaUri.buildUpon().authority(MediaStore.AUTHORITY).build();
+        try {
+            writeFile(resolver, writeTarget, prepared.rotatedFile);
+        } catch (Exception writeFailure) {
+            try {
+                writeFile(resolver, writeTarget, prepared.sourceFile);
+            } catch (Exception restoreFailure) {
+                writeFailure.addSuppressed(restoreFailure);
+            }
+            throw writeFailure;
+        } finally {
+            prepared.cleanup();
+        }
+    }
+
+    static Uri resolveForOverwrite(ContentResolver resolver, Uri pickerUri) {
+        Uri mediaUri = resolveLocalMediaUri(resolver, pickerUri);
+        // createWriteRequest requires a MediaStore item URI under the canonical authority.
+        return mediaUri.buildUpon().authority(MediaStore.AUTHORITY).build();
+    }
+
+    private static PreparedPhoto prepare(Context context, Uri source, int rotationDegrees) throws Exception {
+        ContentResolver resolver = context.getContentResolver();
+        Uri mediaUri = resolveLocalMediaUri(resolver, source);
+        String mime = resolver.getType(mediaUri);
+        String extension;
+        if ("image/jpeg".equalsIgnoreCase(mime) || "image/jpg".equalsIgnoreCase(mime)) {
+            mime = "image/jpeg";
+            extension = ".jpg";
+        } else if ("image/png".equalsIgnoreCase(mime)) {
+            extension = ".png";
+        } else if ("image/webp".equalsIgnoreCase(mime)) {
+            extension = ".webp";
+        } else {
+            throw new IllegalArgumentException("仅支持 JPEG、PNG、WebP 照片");
+        }
+        File original = File.createTempFile("photo-rotator-source-", extension, context.getCacheDir());
+        File rotated = null;
+        try {
+            Uri requireOriginal = MediaStore.setRequireOriginal(mediaUri);
+            try (ParcelFileDescriptor descriptor = resolver.openFileDescriptor(requireOriginal, "r")) {
+                if (descriptor == null) throw new IllegalStateException("无法读取照片原始文件");
+                try (InputStream input = new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
+                     OutputStream output = new FileOutputStream(original)) {
+                    byte[] buffer = new byte[64 * 1024];
+                    int length;
+                    while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
+                }
+            } catch (java.io.IOException | UnsupportedOperationException | SecurityException e) {
+                throw new IllegalStateException("系统未提供照片原文件；请确认照片已下载到本机", e);
+            }
+
+            ExifInterface sourceExif = new ExifInterface(original);
+            String[] originalValues = new String[COPIED_TAGS.length];
+            for (int i = 0; i < COPIED_TAGS.length; i++) {
+                originalValues[i] = sourceExif.getAttribute(COPIED_TAGS[i]);
+            }
+            rotated = File.createTempFile("photo-rotator-rotated-", extension, context.getCacheDir());
+            rotatePixels(original, rotated, mime, sourceExif, rotationDegrees);
+
+            ExifInterface outputExif = new ExifInterface(rotated);
+            for (int i = 0; i < COPIED_TAGS.length; i++) {
+                if (originalValues[i] != null) outputExif.setAttribute(COPIED_TAGS[i], originalValues[i]);
+            }
+            outputExif.setAttribute(ExifInterface.TAG_ORIENTATION,
+                    Integer.toString(ExifInterface.ORIENTATION_NORMAL));
+            outputExif.saveAttributes();
+            ExifInterface verified = new ExifInterface(rotated);
+            if (verified.getAttributeInt(ExifInterface.TAG_ORIENTATION, -1) != ExifInterface.ORIENTATION_NORMAL) {
+                throw new IllegalStateException("无法更新照片方向信息");
+            }
+            for (int i = 0; i < COPIED_TAGS.length; i++) {
+                if (!sameExifValue(COPIED_TAGS[i], originalValues[i], verified.getAttribute(COPIED_TAGS[i]))) {
+                    throw new IllegalStateException("EXIF 字段 " + COPIED_TAGS[i] + " 无法完整保留");
+                }
+            }
+            return new PreparedPhoto(mediaUri, mime, extension, original, rotated);
+        } catch (Exception e) {
+            original.delete();
+            if (rotated != null) rotated.delete();
+            throw e;
+        }
+    }
+
+    private static void writeFile(ContentResolver resolver, Uri destination, File source) throws Exception {
+        try (ParcelFileDescriptor descriptor = resolver.openFileDescriptor(destination, "rwt")) {
+            if (descriptor == null) throw new IllegalStateException("无法打开原照片以写入");
+            try (FileOutputStream output = new FileOutputStream(descriptor.getFileDescriptor());
+                 InputStream input = new FileInputStream(source)) {
+                byte[] buffer = new byte[64 * 1024];
+                int length;
+                while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
+                output.flush();
+                output.getFD().sync();
+            }
+        }
+    }
+
+    private static final class PreparedPhoto {
+        final Uri mediaUri;
+        final String mime;
+        final String extension;
+        final File sourceFile;
+        final File rotatedFile;
+
+        PreparedPhoto(Uri mediaUri, String mime, String extension, File sourceFile, File rotatedFile) {
+            this.mediaUri = mediaUri;
+            this.mime = mime;
+            this.extension = extension;
+            this.sourceFile = sourceFile;
+            this.rotatedFile = rotatedFile;
+        }
+
+        void cleanup() {
+            sourceFile.delete();
+            rotatedFile.delete();
+        }
+    }
+
+    private static boolean sameExifValue(String tag, String original, String copied) {
+        if (java.util.Objects.equals(original, copied)) return true;
+        if (original == null || copied == null) return false;
+        if (ExifInterface.TAG_EXPOSURE_TIME.equals(tag) || ExifInterface.TAG_F_NUMBER.equals(tag)) {
+            try {
+                // ExifInterface writes compatibility rational tags at 1/10000 precision.
+                return Math.abs(Double.parseDouble(original) - Double.parseDouble(copied)) < 0.0001;
+            } catch (NumberFormatException ignored) { }
+        }
+        return false;
+    }
+
+    private static void rotatePixels(File source, File destination, String mime,
+                                     ExifInterface sourceExif, int rotationDegrees) throws Exception {
+        Bitmap bitmap = BitmapFactory.decodeFile(source.getAbsolutePath());
+        if (bitmap == null) throw new IllegalArgumentException("无法解码所选照片");
+        Bitmap oriented = bitmap;
+        Bitmap rotated = null;
+        try {
+            oriented = MainActivity.applyExifOrientation(bitmap,
+                    sourceExif.getAttributeInt(ExifInterface.TAG_ORIENTATION,
+                            ExifInterface.ORIENTATION_NORMAL));
+            Matrix matrix = new Matrix();
+            matrix.postRotate(rotationDegrees);
+            rotated = Bitmap.createBitmap(oriented, 0, 0, oriented.getWidth(),
+                    oriented.getHeight(), matrix, true);
+            Bitmap.CompressFormat format = "image/png".equals(mime)
+                    ? Bitmap.CompressFormat.PNG : "image/webp".equals(mime)
+                    ? Bitmap.CompressFormat.WEBP : Bitmap.CompressFormat.JPEG;
+            try (OutputStream output = new FileOutputStream(destination)) {
+                if (!rotated.compress(format, 95, output)) {
+                    throw new IllegalStateException("无法编码旋转后的照片");
+                }
+            }
+        } finally {
+            if (rotated != null && rotated != oriented) rotated.recycle();
+            if (oriented != bitmap) oriented.recycle();
+            bitmap.recycle();
         }
     }
 
@@ -134,18 +276,16 @@ final class ExifRotation {
             }
             Uri originalUri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
                     .buildUpon().authority(user + "@media").build();
-            try (Cursor picked = resolver.query(pickerUri,
-                    new String[]{MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.MIME_TYPE},
-                    null, null, null);
-                 Cursor original = resolver.query(originalUri,
-                    new String[]{MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.MIME_TYPE},
-                    null, null, null)) {
-                if (picked == null || original == null || !picked.moveToFirst() || !original.moveToFirst()) {
+            // A picker URI can expose a redacted representation of the selected image.
+            // Its byte size and MIME type need not equal those of the MediaStore original.
+            try (Cursor original = resolver.query(originalUri,
+                    new String[]{MediaStore.MediaColumns.MIME_TYPE}, null, null, null)) {
+                if (original == null || !original.moveToFirst()) {
                     throw new IllegalStateException("无法读取所选原图；请允许访问该照片后重新选择");
                 }
-                if (picked.getLong(0) != original.getLong(0)
-                        || !java.util.Objects.equals(picked.getString(1), original.getString(1))) {
-                    throw new IllegalStateException("所选照片与本机原图不一致，未生成副本");
+                String originalMime = original.getString(0);
+                if (originalMime == null || !originalMime.startsWith("image/")) {
+                    throw new IllegalStateException("所选项目不是本机照片，未生成副本");
                 }
             }
             return originalUri;

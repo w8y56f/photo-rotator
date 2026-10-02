@@ -1,22 +1,31 @@
 package dev.stone.photorotator;
 
 import android.Manifest;
-import android.content.Intent;
-import android.content.ContentValues;
+import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
+import android.content.Intent;
+import android.content.IntentSender;
 import android.content.pm.PackageManager;
-import android.os.Build;
-import android.provider.MediaStore;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Matrix;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.ext.SdkExtensions;
+import android.provider.MediaStore;
+import android.util.Log;
+import android.util.LruCache;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
+import android.graphics.drawable.GradientDrawable;
+import android.util.Size;
 import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.GridLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -24,9 +33,10 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.exifinterface.media.ExifInterface;
 
-import java.io.InputStream;
-import java.io.OutputStream;
+import android.graphics.Bitmap;
+import android.graphics.Matrix;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -34,17 +44,41 @@ import java.util.concurrent.Executors;
 public class MainActivity extends AppCompatActivity {
     private static final int PICK_NATIVE_PHOTOS = 12;
     private static final int REQUEST_ORIGINAL_PHOTOS = 13;
+    private static final int REQUEST_OVERWRITE_PERMISSION = 14;
+    private static final int MAX_SELECTED_PHOTOS = 50;
+    // This extra was introduced in API 36 / R extension 15; compileSdk is currently 35.
+    private static final String EXTRA_PICKER_PRE_SELECTION_URIS =
+            "android.provider.extra.PICKER_PRE_SELECTION_URIS";
     private Button chooseButton;
-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private final ArrayList<Uri> selected = new ArrayList<>();
-    private TextView selectionText;
-    private TextView statusText;
     private Button rotateButton;
-    private Button exifRotateButton;
+    private RadioGroup directionGroup;
+    private RadioGroup saveModeGroup;
     private ProgressBar progress;
+    private TextView selectionText;
+    private TextView untickAllButton;
+    private TextView collapsePreviewButton;
+    private TextView statusText;
+    private LinearLayout selectionRow;
+    private GridLayout previewGrid;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService previewWorker = Executors.newFixedThreadPool(2);
+    private final LruCache<String, Bitmap> thumbnailCache = new LruCache<String, Bitmap>(8 * 1024 * 1024) {
+        @Override protected int sizeOf(String key, Bitmap bitmap) {
+            return bitmap.getAllocationByteCount();
+        }
+    };
+    private volatile int previewGeneration;
+    private final ArrayList<Uri> selected = new ArrayList<>();
+    private boolean previewExpanded;
+    private boolean pickerResultReplacesSelection;
+    private boolean selectedUrisFromPhotoPicker = true;
+    private boolean launchedPhotoPicker;
+    private boolean processing;
+    private ArrayList<Uri> pendingItems;
+    private int pendingDegrees;
+    private boolean pendingOverwrite;
 
-    @Override
-    protected void onCreate(@Nullable Bundle savedInstanceState) {
+    @Override protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildScreen();
     }
@@ -58,108 +92,411 @@ public class MainActivity extends AppCompatActivity {
         root.setBackgroundColor(0xFFF7F5FA);
 
         TextView title = new TextView(this);
-        title.setText("照片逆时针旋转");
+        title.setText("Photo Rotator  " + appVersionName());
         title.setTextColor(0xFF1D1B20);
         title.setTextSize(26);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         root.addView(title, matchWrap());
 
-        TextView hint = new TextView(this);
-        hint.setText("从系统相册选择照片，可一次选择多张。旋转后的副本保存到 Pictures/PhotoRotator，原图保留。保留 EXIF 模式需要照片读取和位置信息权限；只修改方向标记，不重新压缩画质。");
-        hint.setTextColor(0xFF625F67);
-        hint.setTextSize(15);
-        LinearLayout.LayoutParams hintParams = matchWrap();
-        hintParams.topMargin = dp(14);
-        root.addView(hint, hintParams);
+        addSectionTitle(root, "旋转设置", dp(22));
+        LinearLayout directionCard = optionCard();
+        directionGroup = new RadioGroup(this);
+        directionGroup.setOrientation(RadioGroup.VERTICAL);
+        addRadio(directionGroup, "逆时针90度", -90, true);
+        addRadio(directionGroup, "顺时针90度", 90, false);
+        addRadio(directionGroup, "180度", 180, false);
+        directionCard.addView(directionGroup, matchWrap());
+        root.addView(directionCard, matchWrap());
+
+        addSectionTitle(root, "编辑后保存方式", dp(18));
+        LinearLayout modeCard = optionCard();
+        saveModeGroup = new RadioGroup(this);
+        saveModeGroup.setOrientation(RadioGroup.HORIZONTAL);
+        addRadio(saveModeGroup, "覆盖", 1, true);
+        addRadio(saveModeGroup, "另存新图", 0, false);
+        modeCard.addView(saveModeGroup, matchWrap());
+        root.addView(modeCard, matchWrap());
+
+        LinearLayout actionRow = new LinearLayout(this);
+        actionRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams actionParams = matchWrap();
+        actionParams.topMargin = dp(20);
+        root.addView(actionRow, actionParams);
 
         chooseButton = new Button(this);
         chooseButton.setText("选择照片");
-        LinearLayout.LayoutParams buttonParams = matchWrap();
-        buttonParams.topMargin = dp(24);
-        root.addView(chooseButton, buttonParams);
+        LinearLayout.LayoutParams chooseParams = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        chooseParams.rightMargin = dp(6);
+        actionRow.addView(chooseButton, chooseParams);
         chooseButton.setOnClickListener(v -> openNativePhotoPicker());
+
+        rotateButton = new Button(this);
+        rotateButton.setText("旋转");
+        rotateButton.setEnabled(false);
+        LinearLayout.LayoutParams rotateParams = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        rotateParams.leftMargin = dp(6);
+        actionRow.addView(rotateButton, rotateParams);
+        rotateButton.setOnClickListener(v -> beginRotation());
+
+        TextView metadataHint = new TextView(this);
+        metadataHint.setText("不会修改 EXIF 信息（如位置、设备等）");
+        metadataHint.setTextColor(0xFF625F67);
+        metadataHint.setTextSize(12);
+        metadataHint.setGravity(Gravity.END);
+        LinearLayout.LayoutParams metadataParams = matchWrap();
+        metadataParams.topMargin = dp(2);
+        root.addView(metadataHint, metadataParams);
+
+        selectionRow = new LinearLayout(this);
+        selectionRow.setOrientation(LinearLayout.HORIZONTAL);
+        selectionRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams selectionParams = matchWrap();
+        selectionParams.topMargin = dp(16);
+        root.addView(selectionRow, selectionParams);
 
         selectionText = new TextView(this);
         selectionText.setText("尚未选择照片");
         selectionText.setTextColor(0xFF1D1B20);
         selectionText.setTextSize(16);
-        LinearLayout.LayoutParams selectionParams = matchWrap();
-        selectionParams.topMargin = dp(12);
-        root.addView(selectionText, selectionParams);
+        selectionRow.addView(selectionText, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        rotateButton = new Button(this);
-        rotateButton.setText("逆时针旋转并保存副本");
-        rotateButton.setEnabled(false);
-        LinearLayout.LayoutParams rotateParams = matchWrap();
-        rotateParams.topMargin = dp(12);
-        root.addView(rotateButton, rotateParams);
-        rotateButton.setOnClickListener(v -> rotateSelected(false));
+        untickAllButton = new TextView(this);
+        untickAllButton.setText("Untick All");
+        untickAllButton.setTextColor(0xFF6750A4);
+        untickAllButton.setTextSize(14);
+        untickAllButton.setGravity(Gravity.CENTER);
+        untickAllButton.setPadding(dp(12), dp(8), dp(4), dp(8));
+        untickAllButton.setVisibility(View.GONE);
+        untickAllButton.setOnClickListener(v -> {
+            if (processing) return;
+            selected.clear();
+            selectedUrisFromPhotoPicker = true;
+            previewExpanded = false;
+            updateSelection();
+        });
+        selectionRow.addView(untickAllButton);
 
-        exifRotateButton = new Button(this);
-        exifRotateButton.setText("逆时针旋转（保留 EXIF）");
-        exifRotateButton.setEnabled(false);
-        LinearLayout.LayoutParams exifParams = matchWrap();
-        exifParams.topMargin = dp(8);
-        root.addView(exifRotateButton, exifParams);
-        exifRotateButton.setOnClickListener(v -> rotatePreservingExif());
+        collapsePreviewButton = new TextView(this);
+        collapsePreviewButton.setText("收起");
+        collapsePreviewButton.setTextColor(0xFF6750A4);
+        collapsePreviewButton.setTextSize(14);
+        collapsePreviewButton.setGravity(Gravity.CENTER);
+        collapsePreviewButton.setPadding(dp(12), dp(8), dp(4), dp(8));
+        collapsePreviewButton.setVisibility(View.GONE);
+        collapsePreviewButton.setOnClickListener(v -> {
+            previewExpanded = false;
+            showSelectionPreview();
+        });
+        selectionRow.addView(collapsePreviewButton);
+
+        previewGrid = new GridLayout(this);
+        previewGrid.setColumnCount(4);
+        previewGrid.setVisibility(View.GONE);
+        LinearLayout.LayoutParams previewParams = matchWrap();
+        previewParams.topMargin = dp(10);
+        root.addView(previewGrid, previewParams);
 
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        progress.setVisibility(ProgressBar.GONE);
+        progress.setVisibility(View.GONE);
         LinearLayout.LayoutParams progressParams = matchWrap();
-        progressParams.topMargin = dp(20);
+        progressParams.topMargin = dp(18);
         root.addView(progress, progressParams);
 
         statusText = new TextView(this);
         statusText.setTextColor(0xFF625F67);
         statusText.setTextSize(14);
         LinearLayout.LayoutParams statusParams = matchWrap();
-        statusParams.topMargin = dp(12);
+        statusParams.topMargin = dp(10);
         root.addView(statusText, statusParams);
+
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.addView(root);
         setContentView(scroll);
     }
 
-    private void openNativePhotoPicker() {
-        // On the target vivo device this resolves to the system photo picker.
-        // Its URI can provide original EXIF after ACCESS_MEDIA_LOCATION is granted.
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-        intent.setType("image/*");
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+    private void addRadio(RadioGroup group, String label, int value, boolean checked) {
+        RadioButton radio = new RadioButton(this);
+        radio.setId(View.generateViewId());
+        radio.setText(label);
+        radio.setTag(value);
+        radio.setMinHeight(dp(48));
+        RadioGroup.LayoutParams params = group.getOrientation() == RadioGroup.HORIZONTAL
+                ? new RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                : new RadioGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        group.addView(radio, params);
+        if (checked) group.check(radio.getId());
+    }
+
+    private String appVersionName() {
         try {
-            startActivityForResult(intent, PICK_NATIVE_PHOTOS);
+            String versionName = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            return versionName == null ? "" : versionName;
+        } catch (PackageManager.NameNotFoundException e) {
+            return "";
+        }
+    }
+
+    private void addSectionTitle(LinearLayout root, String label, int topMargin) {
+        TextView header = new TextView(this);
+        header.setText(label);
+        header.setTextColor(0xFF49454F);
+        header.setTextSize(16);
+        header.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams params = matchWrap();
+        params.topMargin = topMargin;
+        params.bottomMargin = dp(8);
+        root.addView(header, params);
+    }
+
+    private LinearLayout optionCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(12), dp(6), dp(12), dp(6));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(0xFFFFFFFF);
+        background.setCornerRadius(dp(16));
+        card.setBackground(background);
+        return card;
+    }
+
+    private void openNativePhotoPicker() {
+        boolean systemPickerAvailable = supportsSystemPhotoPicker();
+        int systemLimit = systemPickerAvailable ? MediaStore.getPickImagesMaxLimit() : MAX_SELECTED_PHOTOS;
+        boolean canPreselect = systemLimit >= 2 && supportsPickerPreselection() && selectedUrisFromPhotoPicker
+                && selected.size() <= systemLimit;
+        if (selected.size() == MAX_SELECTED_PHOTOS && !canPreselect) {
+            statusText.setText("最多选择 50 张照片；请先删除已选照片，再添加新照片。");
+            return;
+        }
+        if (systemPickerAvailable) {
+            int pickerLimit = Math.min(MAX_SELECTED_PHOTOS, systemLimit);
+            if (!canPreselect) pickerLimit = Math.min(pickerLimit, MAX_SELECTED_PHOTOS - selected.size());
+            Intent intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            intent.setType("image/*");
+            if (pickerLimit >= 2) intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, pickerLimit);
+            if (canPreselect && !selected.isEmpty()) {
+                intent.putParcelableArrayListExtra(EXTRA_PICKER_PRE_SELECTION_URIS,
+                        new ArrayList<>(selected));
+            }
+            try {
+                launchedPhotoPicker = true;
+                pickerResultReplacesSelection = canPreselect;
+                startActivityForResult(intent, PICK_NATIVE_PHOTOS);
+                return;
+            } catch (ActivityNotFoundException | IllegalArgumentException e) {
+                Log.w("PhotoRotator", "System photo picker unavailable", e);
+            }
+        }
+        Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
+        fallback.setType("image/*");
+        fallback.addCategory(Intent.CATEGORY_OPENABLE);
+        fallback.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try {
+            launchedPhotoPicker = false;
+            pickerResultReplacesSelection = false;
+            startActivityForResult(fallback, PICK_NATIVE_PHOTOS);
         } catch (ActivityNotFoundException e) {
             statusText.setText("无法打开系统相册。");
         }
     }
 
+    private boolean supportsSystemPhotoPicker() {
+        return Build.VERSION.SDK_INT >= 33
+                || SdkExtensions.getExtensionVersion(Build.VERSION_CODES.R) >= 2;
+    }
+
+    private boolean supportsPickerPreselection() {
+        return Build.VERSION.SDK_INT >= 36
+                || SdkExtensions.getExtensionVersion(Build.VERSION_CODES.R) >= 15;
+    }
+
     private void updateSelection() {
         selectionText.setText(selected.isEmpty() ? "尚未选择照片" : "已选择 " + selected.size() + " 张照片");
         rotateButton.setEnabled(!selected.isEmpty());
-        exifRotateButton.setEnabled(!selected.isEmpty());
+        if (selected.size() <= 8) previewExpanded = false;
+        showSelectionPreview();
         statusText.setText("");
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_NATIVE_PHOTOS || resultCode != RESULT_OK || data == null) return;
-        selected.clear();
-        if (data.getClipData() != null) {
-            for (int i = 0; i < data.getClipData().getItemCount(); i++) {
-                Uri uri = data.getClipData().getItemAt(i).getUri();
-                if (!selected.contains(uri)) selected.add(uri);
-            }
-        } else if (data.getData() != null) {
-            selected.add(data.getData());
+    private void showSelectionPreview() {
+        int generation = ++previewGeneration;
+        previewGrid.removeAllViews();
+        untickAllButton.setVisibility(!processing && !selected.isEmpty()
+                ? View.VISIBLE : View.GONE);
+        collapsePreviewButton.setVisibility(previewExpanded && selected.size() > 8
+                ? View.VISIBLE : View.GONE);
+        if (selected.isEmpty()) {
+            previewGrid.setVisibility(View.GONE);
+            return;
         }
-        updateSelection();
+        previewGrid.setVisibility(View.VISIBLE);
+        int gap = dp(8);
+        int availableWidth = selectionRow.getWidth();
+        if (availableWidth == 0) availableWidth = getResources().getDisplayMetrics().widthPixels - dp(48);
+        int tileSize = Math.max(1, Math.min(dp(88), (availableWidth - 3 * gap) / 4));
+        int visiblePhotos = previewExpanded ? selected.size()
+                : Math.min(selected.size(), selected.size() > 8 ? 7 : 8);
+        for (int i = 0; i < visiblePhotos; i++) {
+            addPhotoPreview(selected.get(i), i, tileSize, gap, generation);
+        }
+        if (!previewExpanded && selected.size() > 8) {
+            FrameLayout moreTile = previewTile(tileSize, gap, 7);
+            GradientDrawable moreBackground = new GradientDrawable();
+            moreBackground.setColor(0xFF6750A4);
+            moreBackground.setCornerRadius(dp(10));
+            moreTile.setBackground(moreBackground);
+            TextView more = new TextView(this);
+            more.setText("+" + (selected.size() - 7));
+            more.setTextColor(0xFFFFFFFF);
+            more.setTextSize(22);
+            more.setTypeface(null, android.graphics.Typeface.BOLD);
+            more.setGravity(Gravity.CENTER);
+            moreTile.addView(more, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            moreTile.setContentDescription("另有 " + (selected.size() - 7) + " 张已选择照片");
+            moreTile.setClickable(true);
+            moreTile.setFocusable(true);
+            moreTile.setOnClickListener(v -> {
+                previewExpanded = true;
+                showSelectionPreview();
+            });
+            previewGrid.addView(moreTile);
+        }
     }
 
-    private void rotatePreservingExif() {
+    private void addPhotoPreview(Uri uri, int index, int tileSize, int gap, int generation) {
+        FrameLayout tile = previewTile(tileSize, gap, index);
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        tile.addView(image, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        tile.setContentDescription("第 " + (index + 1) + " 张所选照片预览");
+
+        FrameLayout removeTouchTarget = new FrameLayout(this);
+        removeTouchTarget.setContentDescription("移除第 " + (index + 1) + " 张所选照片");
+        TextView remove = new TextView(this);
+        remove.setText("×");
+        remove.setTextSize(11);
+        remove.setTextColor(0xFF1D1B20);
+        remove.setGravity(Gravity.CENTER);
+        GradientDrawable removeBackground = new GradientDrawable();
+        removeBackground.setColor(0xEFFFFFFF);
+        removeBackground.setCornerRadius(dp(9));
+        remove.setBackground(removeBackground);
+        FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(
+                dp(18), dp(18), Gravity.TOP | Gravity.END);
+        iconParams.topMargin = dp(2);
+        iconParams.rightMargin = dp(2);
+        removeTouchTarget.addView(remove, iconParams);
+        FrameLayout.LayoutParams removeParams = new FrameLayout.LayoutParams(
+                dp(36), dp(36), Gravity.TOP | Gravity.END);
+        tile.addView(removeTouchTarget, removeParams);
+        removeTouchTarget.setVisibility(processing ? View.GONE : View.VISIBLE);
+        removeTouchTarget.setOnClickListener(v -> {
+            if (processing) return;
+            selected.remove(uri);
+            updateSelection();
+        });
+        previewGrid.addView(tile);
+
+        String key = uri.toString();
+        Bitmap cached = thumbnailCache.get(key);
+        if (cached != null) {
+            image.setImageBitmap(cached);
+            return;
+        }
+        previewWorker.execute(() -> {
+            if (generation != previewGeneration) return;
+            try {
+                Bitmap thumbnail = getContentResolver().loadThumbnail(
+                        uri, new Size(tileSize, tileSize), null);
+                if (thumbnail == null) return;
+                runOnUiThread(() -> {
+                    if (generation == previewGeneration) {
+                        thumbnailCache.put(key, thumbnail);
+                        image.setImageBitmap(thumbnail);
+                    } else {
+                        thumbnail.recycle();
+                    }
+                });
+            } catch (Exception e) {
+                Log.w("PhotoRotator", "Could not load selected photo thumbnail", e);
+            }
+        });
+    }
+
+    private FrameLayout previewTile(int size, int gap, int index) {
+        FrameLayout tile = new FrameLayout(this);
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(0xFFE7E0EC);
+        background.setCornerRadius(dp(10));
+        tile.setBackground(background);
+        tile.setClipToOutline(true);
+        GridLayout.LayoutParams params = new GridLayout.LayoutParams();
+        params.width = size;
+        params.height = size;
+        params.rightMargin = index % 4 == 3 ? 0 : gap;
+        params.bottomMargin = gap;
+        tile.setLayoutParams(params);
+        return tile;
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == PICK_NATIVE_PHOTOS) {
+            if (resultCode != RESULT_OK || data == null) return;
+            boolean wasEmpty = selected.isEmpty();
+            LinkedHashSet<Uri> updated = pickerResultReplacesSelection
+                    ? new LinkedHashSet<>() : new LinkedHashSet<>(selected);
+            int ignored = 0;
+            if (data.getClipData() != null) {
+                for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                    Uri uri = data.getClipData().getItemAt(i).getUri();
+                    if (!updated.contains(uri)) {
+                        if (updated.size() < MAX_SELECTED_PHOTOS) updated.add(uri);
+                        else ignored++;
+                    }
+                }
+            } else if (data.getData() != null) {
+                Uri uri = data.getData();
+                if (!updated.contains(uri)) {
+                    if (updated.size() < MAX_SELECTED_PHOTOS) updated.add(uri);
+                    else ignored++;
+                }
+            }
+            selected.clear();
+            selected.addAll(updated);
+            selectedUrisFromPhotoPicker = selected.isEmpty() ||
+                    (launchedPhotoPicker && (pickerResultReplacesSelection
+                            || wasEmpty || selectedUrisFromPhotoPicker));
+            updateSelection();
+            if (ignored > 0) statusText.setText("最多选择 50 张照片，另有 " + ignored + " 张未加入。");
+            return;
+        }
+        if (requestCode == REQUEST_ORIGINAL_PHOTOS) {
+            if (resultCode == RESULT_OK) continueAfterReadPermission();
+            else statusText.setText("需要照片读取和位置信息权限才能保留 EXIF。");
+            return;
+        }
+        if (requestCode == REQUEST_OVERWRITE_PERMISSION) {
+            if (resultCode == RESULT_OK && pendingItems != null) {
+                processSelection(pendingItems, pendingDegrees, true);
+            } else {
+                restoreControls();
+                statusText.setText("未获准覆盖照片，原图没有修改。");
+            }
+        }
+    }
+
+    private void beginRotation() {
         if (selected.isEmpty()) return;
+        pendingDegrees = selectedInt(directionGroup);
+        pendingOverwrite = selectedInt(saveModeGroup) == 1;
         String readPermission = Build.VERSION.SDK_INT >= 33
                 ? Manifest.permission.READ_MEDIA_IMAGES : Manifest.permission.READ_EXTERNAL_STORAGE;
         if (checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED
@@ -168,28 +505,59 @@ public class MainActivity extends AppCompatActivity {
                     REQUEST_ORIGINAL_PHOTOS);
             return;
         }
-        rotateSelected(true);
+        continueAfterReadPermission();
     }
 
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    private int selectedInt(RadioGroup group) {
+        RadioButton selectedRadio = findViewById(group.getCheckedRadioButtonId());
+        return (Integer) selectedRadio.getTag();
+    }
+
+    private void continueAfterReadPermission() {
+        ArrayList<Uri> items = new ArrayList<>(selected);
+        if (pendingOverwrite) requestOverwritePermission(items);
+        else processSelection(items, pendingDegrees, false);
+    }
+
+    private void requestOverwritePermission(ArrayList<Uri> pickerItems) {
+        ArrayList<Uri> mediaItems = new ArrayList<>();
+        try {
+            for (Uri uri : pickerItems) {
+                Uri mediaUri = ExifRotation.resolveForOverwrite(getContentResolver(), uri);
+                if (!mediaItems.contains(mediaUri)) mediaItems.add(mediaUri);
+            }
+            PendingIntent request = MediaStore.createWriteRequest(getContentResolver(), mediaItems);
+            pendingItems = pickerItems;
+            startIntentSenderForResult(request.getIntentSender(), REQUEST_OVERWRITE_PERMISSION,
+                    null, 0, 0, 0);
+        } catch (IntentSender.SendIntentException | RuntimeException e) {
+            Log.e("PhotoRotator", "Could not request overwrite access", e);
+            restoreControls();
+            statusText.setText("无法请求覆盖权限：" + (e.getMessage() == null ? "请重试" : e.getMessage()));
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode != REQUEST_ORIGINAL_PHOTOS) return;
         if (grantResults.length == 2 && grantResults[0] == PackageManager.PERMISSION_GRANTED
                 && grantResults[1] == PackageManager.PERMISSION_GRANTED) {
-            rotateSelected(true);
+            continueAfterReadPermission();
         } else {
-            statusText.setText("保留地址和拍照设备信息需要允许读取照片及其位置信息；未生成副本。");
+            restoreControls();
+            statusText.setText("需要照片读取和位置信息权限才能保留 EXIF。");
         }
     }
 
-    private void rotateSelected(boolean preserveExif) {
-        if (selected.isEmpty()) return;
-        List<Uri> items = new ArrayList<>(selected);
+    private void processSelection(List<Uri> items, int degrees, boolean overwrite) {
+        processing = true;
+        previewExpanded = false;
+        showSelectionPreview();
         rotateButton.setEnabled(false);
-        exifRotateButton.setEnabled(false);
         chooseButton.setEnabled(false);
-        progress.setVisibility(ProgressBar.VISIBLE);
+        directionGroup.setEnabled(false);
+        saveModeGroup.setEnabled(false);
+        progress.setVisibility(View.VISIBLE);
         progress.setMax(items.size());
         progress.setProgress(0);
         statusText.setText("准备处理 " + items.size() + " 张照片…");
@@ -197,95 +565,52 @@ public class MainActivity extends AppCompatActivity {
             int success = 0;
             List<String> failures = new ArrayList<>();
             for (int i = 0; i < items.size(); i++) {
-                Uri uri = items.get(i);
                 try {
-                    if (preserveExif) ExifRotation.saveCopy(this, uri);
-                    else rotateAndSave(uri);
+                    if (overwrite) ExifRotation.overwrite(this, items.get(i), degrees);
+                    else ExifRotation.saveCopy(this, items.get(i), degrees);
                     success++;
                 } catch (Exception e) {
-                    failures.add((i + 1) + "：" + (e.getMessage() == null ? "无法保存副本" : e.getMessage()));
+                    Log.e("PhotoRotator", "Failed to rotate photo " + (i + 1), e);
+                    failures.add((i + 1) + "：" + (e.getMessage() == null ? "旋转失败" : e.getMessage()));
                 }
-                final int done = i + 1;
-                final int completed = success;
+                int done = i + 1;
+                int completed = success;
                 runOnUiThread(() -> {
                     progress.setProgress(done);
                     statusText.setText("处理中 " + done + "/" + items.size() + "（成功 " + completed + "）");
                 });
             }
-            final int completed = success;
-            final List<String> errors = failures;
+            int completed = success;
+            List<String> errors = failures;
             runOnUiThread(() -> {
-                progress.setVisibility(ProgressBar.GONE);
-                rotateButton.setEnabled(!selected.isEmpty());
-                exifRotateButton.setEnabled(!selected.isEmpty());
-                chooseButton.setEnabled(true);
+                if (overwrite && completed > 0) thumbnailCache.evictAll();
+                restoreControls();
                 String result = "完成：成功 " + completed + " 张，失败 " + errors.size() + " 张。";
-                if (completed > 0) result += "\n副本已保存到 Pictures/PhotoRotator，原图未修改。";
-                if (preserveExif && completed > 0) result += "\n照片像素未重新编码；部分应用可能不识别方向标记。";
+                if (completed > 0) result += overwrite
+                        ? "\n原照片已覆盖，EXIF 信息保留。"
+                        : "\n旋转后的照片已另存到 Pictures/PhotoRotator。";
                 if (!errors.isEmpty()) result += "\n" + String.join("\n", errors);
                 statusText.setText(result);
             });
         });
     }
 
-    private void rotateAndSave(Uri uri) throws Exception {
-        Bitmap source;
-        int orientation = ExifInterface.ORIENTATION_NORMAL;
-        try (InputStream input = getContentResolver().openInputStream(uri)) {
-            if (input == null) throw new IllegalStateException("无法读取照片");
-            try {
-                orientation = new ExifInterface(input).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
-            } catch (Exception ignored) { }
-        }
-        try (InputStream input = getContentResolver().openInputStream(uri)) {
-            if (input == null) throw new IllegalStateException("无法读取照片");
-            source = BitmapFactory.decodeStream(input);
-        }
-        if (source == null) throw new IllegalArgumentException("不支持的图片格式");
-        Bitmap oriented = applyExifOrientation(source, orientation);
-        if (oriented != source) source.recycle();
-        Matrix rotation = new Matrix();
-        rotation.postRotate(-90f);
-        Bitmap rotated = Bitmap.createBitmap(oriented, 0, 0, oriented.getWidth(), oriented.getHeight(), rotation, true);
-        if (rotated != oriented) oriented.recycle();
-
-        String type = getContentResolver().getType(uri);
-        Bitmap.CompressFormat format = Bitmap.CompressFormat.JPEG;
-        if (type != null && type.equalsIgnoreCase("image/png")) format = Bitmap.CompressFormat.PNG;
-        else if (type != null && type.equalsIgnoreCase("image/webp")) format = Bitmap.CompressFormat.WEBP;
-        Uri destination = null;
-        try {
-            boolean png = format == Bitmap.CompressFormat.PNG;
-            boolean webp = format == Bitmap.CompressFormat.WEBP;
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Images.Media.DISPLAY_NAME, "Rotated_" + java.util.UUID.randomUUID()
-                    + (png ? ".png" : webp ? ".webp" : ".jpg"));
-            values.put(MediaStore.Images.Media.MIME_TYPE, png ? "image/png" : webp ? "image/webp" : "image/jpeg");
-            values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PhotoRotator");
-            values.put(MediaStore.Images.Media.IS_PENDING, 1);
-            destination = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            if (destination == null) throw new IllegalStateException("无法创建照片副本");
-            try (OutputStream output = getContentResolver().openOutputStream(destination, "wt")) {
-                if (output == null) throw new IllegalStateException("无法写入照片");
-                if (!rotated.compress(format, 95, output)) throw new IllegalStateException("保存照片失败");
-                output.flush();
-            }
-            ContentValues ready = new ContentValues();
-            ready.put(MediaStore.Images.Media.IS_PENDING, 0);
-            if (getContentResolver().update(destination, ready, null, null) != 1)
-                throw new IllegalStateException("无法将副本添加到相册");
-        } catch (Exception e) {
-            if (destination != null) {
-                try { getContentResolver().delete(destination, null, null); }
-                catch (Exception cleanupFailure) { e.addSuppressed(cleanupFailure); }
-            }
-            throw e;
-        } finally {
-            rotated.recycle();
-        }
+    private void restoreControls() {
+        processing = false;
+        progress.setVisibility(View.GONE);
+        rotateButton.setEnabled(!selected.isEmpty());
+        chooseButton.setEnabled(true);
+        setGroupEnabled(directionGroup, true);
+        setGroupEnabled(saveModeGroup, true);
+        showSelectionPreview();
     }
 
-    private Bitmap applyExifOrientation(Bitmap source, int orientation) {
+    private void setGroupEnabled(ViewGroup group, boolean enabled) {
+        group.setEnabled(enabled);
+        for (int i = 0; i < group.getChildCount(); i++) group.getChildAt(i).setEnabled(enabled);
+    }
+
+    static Bitmap applyExifOrientation(Bitmap source, int orientation) {
         Matrix matrix = new Matrix();
         switch (orientation) {
             case ExifInterface.ORIENTATION_FLIP_HORIZONTAL: matrix.setScale(-1, 1); break;
@@ -300,10 +625,19 @@ public class MainActivity extends AppCompatActivity {
         return Bitmap.createBitmap(source, 0, 0, source.getWidth(), source.getHeight(), matrix, true);
     }
 
-    private int dp(int value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
-    private LinearLayout.LayoutParams matchWrap() { return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT); }
+    private int dp(int value) {
+        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private LinearLayout.LayoutParams matchWrap() {
+        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
 
     @Override protected void onDestroy() {
+        previewGeneration++;
+        previewWorker.shutdownNow();
+        thumbnailCache.evictAll();
         worker.shutdown();
         super.onDestroy();
     }

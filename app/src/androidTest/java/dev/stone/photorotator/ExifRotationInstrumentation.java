@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.app.Instrumentation;
 import android.content.ContentResolver;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.MediaStore;
@@ -41,29 +43,39 @@ public class ExifRotationInstrumentation extends Instrumentation {
             ExifInterface source = new ExifInterface(new ByteArrayInputStream(before));
             result.putBoolean("source_has_gps", source.getLatLong() != null);
             result.putBoolean("source_has_camera", source.hasAttribute(ExifInterface.TAG_MODEL));
-            output = ExifRotation.saveCopy(getTargetContext(), picker);
+            output = ExifRotation.saveCopy(getTargetContext(), picker, -90);
             byte[] copied = read(resolver, output);
             ExifInterface rotated = new ExifInterface(new ByteArrayInputStream(copied));
             String[] tags = {"GPSLatitude", "GPSLatitudeRef", "GPSLongitude", "GPSLongitudeRef",
                     "GPSAltitude", "GPSAltitudeRef", "GPSTimeStamp", "GPSDateStamp",
                     "Make", "Model", "DateTimeOriginal", "DateTimeDigitized", "FNumber",
-                    "ExposureTime", "PhotographicSensitivity", "FocalLength", "LensModel", "MakerNote"};
+                    "ExposureTime", "PhotographicSensitivity", "FocalLength", "LensModel"};
             int retained = 0;
             for (String tag : tags) {
                 require(Objects.equals(source.getAttribute(tag), rotated.getAttribute(tag)), "Changed tag: " + tag);
                 if (source.hasAttribute(tag)) retained++;
             }
-            source.rotate(-90);
-            require(source.getAttributeInt(ExifInterface.TAG_ORIENTATION, 1)
-                    == rotated.getAttributeInt(ExifInterface.TAG_ORIENTATION, 1), "Wrong rotation");
-            require(Arrays.equals(jpegPayload(before), jpegPayload(copied)), "JPEG pixel payload changed");
+            Bitmap sourcePixels = BitmapFactory.decodeByteArray(before, 0, before.length);
+            Bitmap resultPixels = BitmapFactory.decodeByteArray(copied, 0, copied.length);
+            require(sourcePixels != null && resultPixels != null, "Cannot decode images");
+            int sourceOrientation = source.getAttributeInt(ExifInterface.TAG_ORIENTATION, 1);
+            boolean sourceQuarterTurn = sourceOrientation >= ExifInterface.ORIENTATION_TRANSPOSE
+                    && sourceOrientation <= ExifInterface.ORIENTATION_ROTATE_270;
+            require(resultPixels.getWidth() == (sourceQuarterTurn ? sourcePixels.getWidth() : sourcePixels.getHeight())
+                    && resultPixels.getHeight() == (sourceQuarterTurn ? sourcePixels.getHeight() : sourcePixels.getWidth()),
+                    "Rotated pixel dimensions are wrong");
+            require(rotated.getAttributeInt(ExifInterface.TAG_ORIENTATION, -1)
+                    == ExifInterface.ORIENTATION_NORMAL, "Output orientation is not normal");
+            require(!Arrays.equals(jpegPayload(before), jpegPayload(copied)), "JPEG pixel payload did not change");
+            sourcePixels.recycle();
+            resultPixels.recycle();
             require(Arrays.equals(sha(before), sha(read(resolver, MediaStore.setRequireOriginal(original)))),
                     "Original file changed");
             result.putInt("present_metadata_tags_preserved", retained);
             result.putBoolean("gps_preserved", true);
             result.putBoolean("camera_preserved", true);
             result.putBoolean("orientation_correct", true);
-            result.putBoolean("jpeg_payload_unchanged", true);
+            result.putBoolean("jpeg_payload_rotated", true);
             result.putBoolean("original_file_unchanged", true);
             code = Activity.RESULT_OK;
         } catch (Throwable e) {

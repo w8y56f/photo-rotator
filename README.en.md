@@ -2,16 +2,18 @@
 
 [简体中文](README.md)
 
-A lightweight Android app that lets you select one or more photos in the system photo picker, rotate them 90° counterclockwise, and save copies to `Pictures/PhotoRotator`. Originals are kept unchanged.
+A lightweight Android app that lets you select one or more photos in the system photo picker, rotate them by 90° or 180°, and either overwrite the originals or save copies to `Pictures/PhotoRotator`.
 
 ## Features
 
-- **Rotate and save a copy**: rotates image pixels and re-encodes the image. JPEG output uses 95% quality; this mode does not guarantee preservation of all EXIF metadata.
-- **Rotate while preserving EXIF**: supports JPEG, PNG, and WebP. The app reads the local original and updates only the EXIF orientation in the copy, without re-encoding image pixels. It checks GPS, camera make/model, and original capture time. Photo and photo-location access are required; the app requests these permissions on first use. If the original cannot be accessed or metadata verification fails, no copy is created.
-- **Batch processing**: select multiple photos and see the result for each item.
-- **System photo picker**: no folder selection or whole-directory access is required. Cloud photos that are not downloaded locally may not work in EXIF-preserving mode.
+- **Rotation direction**: 90° counterclockwise (default), 90° clockwise, or 180°.
+- **Save mode**: save a new image (default) to `Pictures/PhotoRotator`, or overwrite the original after Android grants write access.
+- **EXIF information**: common EXIF data is retained, including GPS, camera make/model, and capture time. Pixels are re-encoded; proprietary maker data and embedded thumbnails may not be retained. If an overwrite fails, the app attempts to restore the original file.
+- **Batch processing**: keep up to 50 photos selected at once, with previews, an expanded view, and individual removal before processing.
+- **Picking again**: supported systems preselect the current photos in the picker; older systems append new picks without duplicates.
+- **System photo picker**: no folder selection or whole-directory access is required. Cloud photos that are not downloaded locally cannot be rotated.
 
-EXIF-preserving mode temporarily copies the photo into the app cache, so allow roughly as much free cache space as the source file size. Some image viewers ignore EXIF orientation and may not display the rotated direction.
+Processing keeps temporary source and rotated files in the app cache and encodes JPEG/WebP at 95% quality, so allow sufficient free cache space. Overwriting requires approval in an Android confirmation prompt.
 
 ## Build
 
@@ -33,7 +35,7 @@ The APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 The system photo picker may return a virtual path or a transformed display name. For local Android photo-picker URIs, the app reads the original MediaStore image ID from the URI and checks the file size and MIME type before accessing the corresponding local original. It does not guess based on a filename alone. Other URI shapes use filename, size, and relative directory matching, and ambiguous matches are rejected.
 
-EXIF-preserving rotation uses AndroidX `ExifInterface`. Before and after writing, the app compares GPS coordinates and time, camera make/model, and original capture time. Failed or incomplete copies are removed. The app never overwrites the original.
+EXIF handling uses AndroidX `ExifInterface`. Before and after writing, the app compares the common EXIF fields it copies and sets the image orientation to normal. Failed new copies are removed; failed overwrites attempt to restore the original file.
 
 ## License
 
