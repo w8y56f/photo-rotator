@@ -3,6 +3,7 @@ package dev.stone.photorotator;
 import android.Manifest;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.IntentSender;
 import android.content.pm.PackageManager;
@@ -30,6 +31,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.exifinterface.media.ExifInterface;
 
@@ -46,6 +48,8 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQUEST_ORIGINAL_PHOTOS = 13;
     private static final int REQUEST_OVERWRITE_PERMISSION = 14;
     private static final int MAX_SELECTED_PHOTOS = 50;
+    private static final String STATE_SELECTED = "selected_photos";
+    private static final String STATE_PICKER_SELECTION = "picker_selection";
     // This extra was introduced in API 36 / R extension 15; compileSdk is currently 35.
     private static final String EXTRA_PICKER_PRE_SELECTION_URIS =
             "android.provider.extra.PICKER_PRE_SELECTION_URIS";
@@ -81,6 +85,102 @@ public class MainActivity extends AppCompatActivity {
     @Override protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildScreen();
+        if (savedInstanceState != null) {
+            ArrayList<Uri> restored = savedInstanceState.getParcelableArrayList(STATE_SELECTED);
+            if (restored != null) selected.addAll(restored);
+            selectedUrisFromPhotoPicker = savedInstanceState.getBoolean(STATE_PICKER_SELECTION, true);
+            updateSelection();
+        } else {
+            receiveSharedImages(getIntent());
+        }
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        receiveSharedImages(intent);
+    }
+
+    @Override protected void onSaveInstanceState(Bundle outState) {
+        outState.putParcelableArrayList(STATE_SELECTED, new ArrayList<>(selected));
+        outState.putBoolean(STATE_PICKER_SELECTION, selectedUrisFromPhotoPicker);
+        super.onSaveInstanceState(outState);
+    }
+
+    private void receiveSharedImages(Intent intent) {
+        if (intent == null || !(Intent.ACTION_SEND.equals(intent.getAction())
+                || Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction()))) return;
+        if (processing) {
+            statusText.setText("正在处理照片，请完成后重新分享。");
+            return;
+        }
+        ArrayList<Uri> shared = new ArrayList<>();
+        if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
+            ArrayList<?> streams = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (streams != null) {
+                for (Object item : streams) {
+                    if (!(item instanceof Uri)) {
+                        statusText.setText("分享内容包含无效的照片地址，请重新分享。");
+                        return;
+                    }
+                    shared.add((Uri) item);
+                }
+            }
+        } else {
+            Object stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (stream instanceof Uri) shared.add((Uri) stream);
+        }
+        if (shared.isEmpty()) {
+            ClipData clip = intent.getClipData();
+            if (clip != null) {
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    Uri uri = clip.getItemAt(i).getUri();
+                    if (uri != null) shared.add(uri);
+                }
+            }
+        }
+        if (shared.size() > MAX_SELECTED_PHOTOS) {
+            new AlertDialog.Builder(this)
+                    .setTitle("分享的照片过多")
+                    .setMessage("本次分享了 " + shared.size() + " 张照片，最多可一次处理 50 张。请回到相册，重新选择不超过 50 张。")
+                    .setPositiveButton("知道了", null)
+                    .show();
+            return;
+        }
+        if (shared.isEmpty()) {
+            statusText.setText("没有收到照片，请从相册重新分享。");
+            return;
+        }
+        for (Uri uri : shared) {
+            if (!"content".equals(uri.getScheme())) {
+                statusText.setText("分享内容包含无法读取的照片地址，请从相册重新分享。");
+                return;
+            }
+            try {
+                String mime = getContentResolver().getType(uri);
+                if (mime != null && !mime.startsWith("image/")) {
+                    statusText.setText("分享内容包含非图片文件，请只分享照片。");
+                    return;
+                }
+                if (mime != null && !"image/jpeg".equalsIgnoreCase(mime)
+                        && !"image/jpg".equalsIgnoreCase(mime)
+                        && !"image/png".equalsIgnoreCase(mime)
+                        && !"image/webp".equalsIgnoreCase(mime)) {
+                    statusText.setText("分享内容包含暂不支持的图片格式；目前只支持 JPEG、PNG、WebP。");
+                    return;
+                }
+            } catch (RuntimeException e) {
+                Log.w("PhotoRotator", "Could not inspect shared photo", e);
+                statusText.setText("无法读取分享的照片，请从相册重新分享。");
+                return;
+            }
+        }
+        selected.clear();
+        selected.addAll(new LinkedHashSet<>(shared));
+        selectedUrisFromPhotoPicker = false;
+        previewExpanded = false;
+        updateSelection();
+        statusText.setText("已载入 " + selected.size() + " 张分享照片。请确认旋转设置与保存方式；其他应用分享的照片可能不包含完整 EXIF，且可能无法覆盖原图。");
     }
 
     private void buildScreen() {
@@ -497,10 +597,22 @@ public class MainActivity extends AppCompatActivity {
         if (selected.isEmpty()) return;
         pendingDegrees = selectedInt(directionGroup);
         pendingOverwrite = selectedInt(saveModeGroup) == 1;
+        boolean needsOriginalMediaAccess = pendingOverwrite;
+        for (Uri uri : selected) {
+            String authority = uri.getAuthority();
+            if ("media".equals(authority)
+                    || "com.android.providers.media.documents".equals(authority)
+                    || "com.android.externalstorage.documents".equals(authority)
+                    || (authority != null && authority.endsWith("@media"))) {
+                needsOriginalMediaAccess = true;
+                break;
+            }
+        }
         String readPermission = Build.VERSION.SDK_INT >= 33
                 ? Manifest.permission.READ_MEDIA_IMAGES : Manifest.permission.READ_EXTERNAL_STORAGE;
-        if (checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED
-                || checkSelfPermission(readPermission) != PackageManager.PERMISSION_GRANTED) {
+        if (needsOriginalMediaAccess
+                && (checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED
+                || checkSelfPermission(readPermission) != PackageManager.PERMISSION_GRANTED)) {
             requestPermissions(new String[]{readPermission, Manifest.permission.ACCESS_MEDIA_LOCATION},
                     REQUEST_ORIGINAL_PHOTOS);
             return;
@@ -520,21 +632,48 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void requestOverwritePermission(ArrayList<Uri> pickerItems) {
-        ArrayList<Uri> mediaItems = new ArrayList<>();
-        try {
-            for (Uri uri : pickerItems) {
-                Uri mediaUri = ExifRotation.resolveForOverwrite(getContentResolver(), uri);
-                if (!mediaItems.contains(mediaUri)) mediaItems.add(mediaUri);
+        processing = true;
+        rotateButton.setEnabled(false);
+        chooseButton.setEnabled(false);
+        setGroupEnabled(directionGroup, false);
+        setGroupEnabled(saveModeGroup, false);
+        showSelectionPreview();
+        progress.setVisibility(View.VISIBLE);
+        progress.setMax(pickerItems.size());
+        progress.setProgress(0);
+        statusText.setText("正在确认分享照片与本机原图…");
+        worker.execute(() -> {
+            try {
+                ArrayList<Uri> mediaItems = new ArrayList<>();
+                for (int i = 0; i < pickerItems.size(); i++) {
+                    Uri mediaUri = ExifRotation.resolveForOverwrite(this, pickerItems.get(i));
+                    if (!mediaItems.contains(mediaUri)) mediaItems.add(mediaUri);
+                    int checked = i + 1;
+                    runOnUiThread(() -> progress.setProgress(checked));
+                }
+                runOnUiThread(() -> {
+                    try {
+                        PendingIntent request = MediaStore.createWriteRequest(getContentResolver(), mediaItems);
+                        pendingItems = pickerItems;
+                        progress.setVisibility(View.GONE);
+                        statusText.setText("等待覆盖照片授权…");
+                        startIntentSenderForResult(request.getIntentSender(), REQUEST_OVERWRITE_PERMISSION,
+                                null, 0, 0, 0);
+                    } catch (IntentSender.SendIntentException | RuntimeException e) {
+                        showOverwritePreparationError(e);
+                    }
+                });
+            } catch (RuntimeException e) {
+                runOnUiThread(() -> showOverwritePreparationError(e));
             }
-            PendingIntent request = MediaStore.createWriteRequest(getContentResolver(), mediaItems);
-            pendingItems = pickerItems;
-            startIntentSenderForResult(request.getIntentSender(), REQUEST_OVERWRITE_PERMISSION,
-                    null, 0, 0, 0);
-        } catch (IntentSender.SendIntentException | RuntimeException e) {
-            Log.e("PhotoRotator", "Could not request overwrite access", e);
-            restoreControls();
-            statusText.setText("无法请求覆盖权限：" + (e.getMessage() == null ? "请重试" : e.getMessage()));
-        }
+        });
+    }
+
+    private void showOverwritePreparationError(Exception e) {
+        Log.e("PhotoRotator", "Could not request overwrite access", e);
+        pendingItems = null;
+        restoreControls();
+        statusText.setText("无法请求覆盖权限：" + (e.getMessage() == null ? "请重试" : e.getMessage()));
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {

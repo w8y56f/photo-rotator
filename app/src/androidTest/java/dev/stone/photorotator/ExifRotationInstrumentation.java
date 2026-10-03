@@ -23,6 +23,10 @@ public class ExifRotationInstrumentation extends Instrumentation {
     @Override public void onCreate(Bundle args) { super.onCreate(args); arguments = args; start(); }
 
     @Override public void onStart() {
+        if ("true".equals(arguments.getString("jpegMatcherOnly"))) {
+            testJpegMatcher();
+            return;
+        }
         Bundle result = new Bundle();
         Uri output = null;
         ContentResolver resolver = getTargetContext().getContentResolver();
@@ -92,6 +96,30 @@ public class ExifRotationInstrumentation extends Instrumentation {
         }
     }
 
+    private void testJpegMatcher() {
+        Bundle result = new Bundle();
+        int code = Activity.RESULT_CANCELED;
+        try {
+            byte[] original = jpeg((byte) 1, (byte) 9);
+            byte[] redacted = jpeg((byte) 2, (byte) 9);
+            byte[] different = jpeg((byte) 2, (byte) 8);
+            require(ExifRotation.sameJpegImageData(
+                    new ByteArrayInputStream(original), new ByteArrayInputStream(redacted)),
+                    "EXIF-only change was not matched");
+            require(!ExifRotation.sameJpegImageData(
+                    new ByteArrayInputStream(original), new ByteArrayInputStream(different)),
+                    "Different image data was matched");
+            require(!ExifRotation.sameJpegImageData(
+                    new ByteArrayInputStream(new byte[]{1, 2, 3}), new ByteArrayInputStream(original)),
+                    "Invalid JPEG was matched");
+            result.putBoolean("jpeg_matcher_passed", true);
+            code = Activity.RESULT_OK;
+        } catch (Throwable e) {
+            result.putString("failure", e.toString());
+        }
+        finish(code, result);
+    }
+
     private byte[] read(ContentResolver resolver, Uri uri) throws Exception {
         try (InputStream input = resolver.openInputStream(uri); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             require(input != null, "Missing stream");
@@ -115,6 +143,12 @@ public class ExifRotationInstrumentation extends Instrumentation {
             offset += length;
         }
         throw new AssertionError("Missing JPEG scan");
+    }
+    private byte[] jpeg(byte metadata, byte pixel) {
+        return new byte[]{(byte) 0xff, (byte) 0xd8,
+                (byte) 0xff, (byte) 0xe1, 0, 3, metadata,
+                (byte) 0xff, (byte) 0xda, 0, 2,
+                pixel, (byte) 0xff, (byte) 0xd9};
     }
     private static void require(boolean value, String message) { if (!value) throw new AssertionError(message); }
 }

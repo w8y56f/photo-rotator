@@ -11,12 +11,14 @@ import android.graphics.Matrix;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 
 import androidx.exifinterface.media.ExifInterface;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.BufferedInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.List;
@@ -56,7 +58,7 @@ final class ExifRotation {
 
     static Uri saveCopy(Context context, Uri source, int rotationDegrees) throws Exception {
         ContentResolver resolver = context.getContentResolver();
-        PreparedPhoto prepared = prepare(context, source, rotationDegrees);
+        PreparedPhoto prepared = prepare(context, source, rotationDegrees, false);
         Uri destination = null;
         try {
             ContentValues values = new ContentValues();
@@ -94,7 +96,7 @@ final class ExifRotation {
     }
 
     static void overwrite(Context context, Uri source, int rotationDegrees) throws Exception {
-        PreparedPhoto prepared = prepare(context, source, rotationDegrees);
+        PreparedPhoto prepared = prepare(context, source, rotationDegrees, true);
         ContentResolver resolver = context.getContentResolver();
         Uri writeTarget = prepared.mediaUri.buildUpon().authority(MediaStore.AUTHORITY).build();
         try {
@@ -111,16 +113,31 @@ final class ExifRotation {
         }
     }
 
-    static Uri resolveForOverwrite(ContentResolver resolver, Uri pickerUri) {
-        Uri mediaUri = resolveLocalMediaUri(resolver, pickerUri);
-        // createWriteRequest requires a MediaStore item URI under the canonical authority.
-        return mediaUri.buildUpon().authority(MediaStore.AUTHORITY).build();
+    static Uri resolveForOverwrite(Context context, Uri pickerUri) {
+        try {
+            Uri mediaUri = resolveLocalMediaUri(context, pickerUri);
+            // createWriteRequest requires a MediaStore item URI under the canonical authority.
+            return mediaUri.buildUpon().authority(MediaStore.AUTHORITY).build();
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("无法确认分享照片的本机原图（" + e.getMessage()
+                    + "），不能覆盖；请改选另存新图", e);
+        }
     }
 
-    private static PreparedPhoto prepare(Context context, Uri source, int rotationDegrees) throws Exception {
+    private static PreparedPhoto prepare(Context context, Uri source, int rotationDegrees,
+                                         boolean overwrite) throws Exception {
         ContentResolver resolver = context.getContentResolver();
-        Uri mediaUri = resolveLocalMediaUri(resolver, source);
-        String mime = resolver.getType(mediaUri);
+        Uri mediaUri;
+        try {
+            mediaUri = resolveLocalMediaUri(context, source);
+        } catch (RuntimeException e) {
+            if (overwrite) {
+                throw new IllegalStateException("无法确认分享照片的本机原图（" + e.getMessage()
+                        + "），不能覆盖；请改选另存新图", e);
+            }
+            mediaUri = null;
+        }
+        String mime = resolver.getType(mediaUri != null ? mediaUri : source);
         String extension;
         if ("image/jpeg".equalsIgnoreCase(mime) || "image/jpg".equalsIgnoreCase(mime)) {
             mime = "image/jpeg";
@@ -135,17 +152,25 @@ final class ExifRotation {
         File original = File.createTempFile("photo-rotator-source-", extension, context.getCacheDir());
         File rotated = null;
         try {
-            Uri requireOriginal = MediaStore.setRequireOriginal(mediaUri);
-            try (ParcelFileDescriptor descriptor = resolver.openFileDescriptor(requireOriginal, "r")) {
-                if (descriptor == null) throw new IllegalStateException("无法读取照片原始文件");
-                try (InputStream input = new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
-                     OutputStream output = new FileOutputStream(original)) {
-                    byte[] buffer = new byte[64 * 1024];
-                    int length;
-                    while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
+            if (mediaUri != null) {
+                Uri requireOriginal = MediaStore.setRequireOriginal(mediaUri);
+                try (ParcelFileDescriptor descriptor = resolver.openFileDescriptor(requireOriginal, "r")) {
+                    if (descriptor == null) throw new IllegalStateException("无法读取照片原始文件");
+                    try (InputStream input = new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
+                         OutputStream output = new FileOutputStream(original)) {
+                        copy(input, output);
+                    }
+                } catch (java.io.IOException | UnsupportedOperationException | SecurityException e) {
+                    throw new IllegalStateException("系统未提供照片原文件；请确认照片已下载到本机", e);
                 }
-            } catch (java.io.IOException | UnsupportedOperationException | SecurityException e) {
-                throw new IllegalStateException("系统未提供照片原文件；请确认照片已下载到本机", e);
+            } else {
+                // Non-MediaStore shares can only provide the bytes and EXIF exposed by
+                // the sending app. They cannot be safely used for overwrite.
+                try (InputStream input = resolver.openInputStream(source);
+                     OutputStream output = new FileOutputStream(original)) {
+                    if (input == null) throw new IllegalStateException("无法读取分享的照片");
+                    copy(input, output);
+                }
             }
 
             ExifInterface sourceExif = new ExifInterface(original);
@@ -178,6 +203,12 @@ final class ExifRotation {
             if (rotated != null) rotated.delete();
             throw e;
         }
+    }
+
+    private static void copy(InputStream input, OutputStream output) throws java.io.IOException {
+        byte[] buffer = new byte[64 * 1024];
+        int length;
+        while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
     }
 
     private static void writeFile(ContentResolver resolver, Uri destination, File source) throws Exception {
@@ -256,8 +287,37 @@ final class ExifRotation {
         }
     }
 
+    private static Uri resolveLocalMediaUri(Context context, Uri source) {
+        String authority = source.getAuthority();
+        if ("com.android.providers.media.documents".equals(authority)
+                || "com.android.externalstorage.documents".equals(authority)) {
+            Uri equivalent = MediaStore.getMediaUri(context, source);
+            if (equivalent != null) {
+                return resolveLocalMediaUri(context.getContentResolver(), equivalent);
+            }
+        }
+        return resolveLocalMediaUri(context.getContentResolver(), source);
+    }
+
     static Uri resolveLocalMediaUri(ContentResolver resolver, Uri pickerUri) {
         List<String> segments = pickerUri.getPathSegments();
+        if ("media".equals(pickerUri.getAuthority()) && segments.size() == 4
+                && "images".equals(segments.get(1)) && "media".equals(segments.get(2))) {
+            try {
+                if (Long.parseLong(segments.get(3)) <= 0) throw new NumberFormatException();
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException("分享的本机照片标识无效", e);
+            }
+            try (Cursor original = resolver.query(pickerUri,
+                    new String[]{MediaStore.MediaColumns.MIME_TYPE}, null, null, null)) {
+                if (original == null || !original.moveToFirst()
+                        || original.getString(0) == null
+                        || !original.getString(0).startsWith("image/")) {
+                    throw new IllegalStateException("无法读取分享的本机原图");
+                }
+            }
+            return pickerUri;
+        }
         if ("media".equals(pickerUri.getAuthority()) && segments.size() == 5
                 && ("picker".equals(segments.get(0)) || "picker_get_content".equals(segments.get(0)))
                 && "com.android.providers.media.photopicker".equals(segments.get(2))
@@ -290,50 +350,156 @@ final class ExifRotation {
             }
             return originalUri;
         }
-        String path;
         String name;
         long size;
+        // Shared content providers are only required to expose these two columns;
+        // asking them for DATA in the same query can make the whole query fail.
         try (Cursor picked = resolver.query(pickerUri,
-                new String[]{MediaStore.MediaColumns.DATA, MediaStore.MediaColumns.DISPLAY_NAME,
-                        MediaStore.MediaColumns.SIZE}, null, null, null)) {
+                new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE},
+                null, null, null)) {
             if (picked == null || !picked.moveToFirst()) {
-                throw new IllegalStateException("无法找到所选照片的本机原始文件；未生成副本");
+                throw new IllegalStateException("无法读取分享照片的名称与大小");
             }
-            path = picked.getString(0);
-            name = picked.getString(1);
-            size = picked.getLong(2);
+            name = picked.getString(0);
+            size = picked.isNull(1) ? -1 : picked.getLong(1);
         }
-        if (path == null || path.isEmpty() || name == null || size <= 0) {
-            throw new IllegalStateException("此照片没有可读取的本机原始文件；未生成副本");
+        if (name == null || name.isEmpty()) {
+            throw new IllegalStateException("分享照片没有可用于确认原图的名称");
         }
-        // Picker paths can start with /sdcard, /storage/emulated or /mnt/user,
-        // while MediaStore stores another spelling of that same location.
-        // Match the relative directory, exact filename and exact byte size.
+        String path = null;
+        try (Cursor picked = resolver.query(pickerUri,
+                new String[]{MediaStore.MediaColumns.DATA}, null, null, null)) {
+            if (picked != null && picked.moveToFirst()) path = picked.getString(0);
+        } catch (RuntimeException ignored) {
+            // Most sharing providers do not expose a filesystem path.
+        }
+        // Galleries can strip camera EXIF when sharing. The exported file then has
+        // a different byte size even though it refers to the same local photo.
+        // Check the path first, then compare the actual image data if needed.
         Uri match = null;
         try (Cursor original = resolver.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 new String[]{MediaStore.Images.Media._ID, MediaStore.MediaColumns.RELATIVE_PATH,
-                        MediaStore.MediaColumns.DISPLAY_NAME},
-                MediaStore.MediaColumns.DISPLAY_NAME + "=? AND " + MediaStore.MediaColumns.SIZE + "=?",
-                new String[]{name, Long.toString(size)}, null)) {
+                        MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.SIZE,
+                        MediaStore.MediaColumns.MIME_TYPE},
+                MediaStore.MediaColumns.DISPLAY_NAME + "=?",
+                new String[]{name}, null)) {
             if (original == null) {
                 throw new IllegalStateException("无法查询本机原图；未生成副本");
             }
             while (original.moveToNext()) {
                 String relative = original.getString(1);
                 String displayName = original.getString(2);
-                if (relative == null || displayName == null) continue;
-                String suffix = "/" + relative + displayName;
-                if (!path.endsWith(suffix)) continue;
-                if (match != null) {
-                    throw new IllegalStateException("找到多张同名同大小照片，无法安全确认原图；未生成副本");
-                }
-                match = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                if (displayName == null) continue;
+                Uri candidate = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                         original.getLong(0));
+                boolean samePath = path != null && relative != null
+                        && path.endsWith("/" + relative + displayName);
+                boolean sameBytes = !samePath && !original.isNull(3) && size == original.getLong(3)
+                        && sameOriginalBytes(resolver, pickerUri, candidate);
+                boolean sameJpegData = !samePath && !sameBytes
+                        && "image/jpeg".equalsIgnoreCase(original.getString(4))
+                        && sameJpegImageData(resolver, pickerUri, candidate);
+                if (!samePath && !sameBytes && !sameJpegData) continue;
+                if (match != null) {
+                    throw new IllegalStateException("找到多张匹配的本机照片，无法安全确认原图；未生成副本");
+                }
+                match = candidate;
             }
         }
         if (match == null) {
             throw new IllegalStateException("无法定位本机原图；请确认照片已下载到本机且允许访问所有照片。未生成副本");
         }
         return match;
+    }
+
+    private static boolean sameOriginalBytes(ContentResolver resolver, Uri shared, Uri original) {
+        try (InputStream sharedInput = resolver.openInputStream(shared);
+             ParcelFileDescriptor descriptor = resolver.openFileDescriptor(
+                     MediaStore.setRequireOriginal(original), "r")) {
+            if (sharedInput == null || descriptor == null) return false;
+            try (InputStream originalInput = new ParcelFileDescriptor.AutoCloseInputStream(descriptor)) {
+                byte[] sharedBuffer = new byte[64 * 1024];
+                byte[] originalBuffer = new byte[64 * 1024];
+                int count;
+                while ((count = sharedInput.read(sharedBuffer)) != -1) {
+                    int offset = 0;
+                    while (offset < count) {
+                        int read = originalInput.read(originalBuffer, offset, count - offset);
+                        if (read == -1) return false;
+                        offset += read;
+                    }
+                    for (int i = 0; i < count; i++) {
+                        if (sharedBuffer[i] != originalBuffer[i]) return false;
+                    }
+                }
+                return originalInput.read() == -1;
+            }
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean sameJpegImageData(ContentResolver resolver, Uri shared, Uri original) {
+        try (InputStream sharedInput = resolver.openInputStream(shared);
+             ParcelFileDescriptor descriptor = resolver.openFileDescriptor(
+                     MediaStore.setRequireOriginal(original), "r")) {
+            if (sharedInput == null || descriptor == null) return false;
+            try (InputStream originalInput = new BufferedInputStream(
+                    new ParcelFileDescriptor.AutoCloseInputStream(descriptor))) {
+                return sameJpegImageData(sharedInput, originalInput);
+            }
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static boolean sameJpegImageData(InputStream sharedInput, InputStream originalInput)
+            throws java.io.IOException {
+        InputStream shared = new BufferedInputStream(sharedInput);
+        InputStream original = new BufferedInputStream(originalInput);
+        if (!skipJpegMetadata(shared) || !skipJpegMetadata(original)) return false;
+        byte[] sharedBuffer = new byte[64 * 1024];
+        byte[] originalBuffer = new byte[64 * 1024];
+        int count;
+        while ((count = shared.read(sharedBuffer)) != -1) {
+            int offset = 0;
+            while (offset < count) {
+                int read = original.read(originalBuffer, offset, count - offset);
+                if (read == -1) return false;
+                offset += read;
+            }
+            for (int i = 0; i < count; i++) {
+                if (sharedBuffer[i] != originalBuffer[i]) return false;
+            }
+        }
+        return original.read() == -1;
+    }
+
+    // Compare the JPEG scan and everything after it. APP/EXIF segments before
+    // the scan may differ after a gallery redacts location and camera metadata.
+    private static boolean skipJpegMetadata(InputStream input) throws java.io.IOException {
+        if (input.read() != 0xff || input.read() != 0xd8) return false;
+        while (true) {
+            if (input.read() != 0xff) return false;
+            int marker;
+            do { marker = input.read(); } while (marker == 0xff);
+            if (marker < 0 || marker == 0xd9 || marker == 0x00) return false;
+            if (marker == 0xd8 || marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+            int high = input.read();
+            int low = input.read();
+            if (high < 0 || low < 0) return false;
+            int length = (high << 8) | low;
+            if (length < 2) return false;
+            int remaining = length - 2;
+            while (remaining > 0) {
+                long skipped = input.skip(remaining);
+                if (skipped == 0) {
+                    if (input.read() == -1) return false;
+                    skipped = 1;
+                }
+                remaining -= (int) skipped;
+            }
+            if (marker == 0xda) return true;
+        }
     }
 }
