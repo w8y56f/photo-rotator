@@ -243,23 +243,25 @@ public class MainActivity extends AppCompatActivity {
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
         root.addView(titleRow, matchWrap());
 
+        LinearLayout titleColumn = new LinearLayout(this);
+        titleColumn.setOrientation(LinearLayout.VERTICAL);
+        titleRow.addView(titleColumn, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
         TextView title = new TextView(this);
         title.setText("Photo Rotator");
         title.setTextColor(0xFF1D1B20);
         title.setTextSize(24);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        titleRow.addView(title, wrapWrap());
+        titleColumn.addView(title, wrapWrap());
 
         TextView version = new TextView(this);
-        version.setText(appVersionName());
+        version.setText(appVersionLabel());
         version.setTextColor(0xFF8A8790);
         version.setTextSize(14);
         LinearLayout.LayoutParams versionParams = wrapWrap();
-        versionParams.leftMargin = dp(8);
-        titleRow.addView(version, versionParams);
-
-        View titleSpacer = new View(this);
-        titleRow.addView(titleSpacer, new LinearLayout.LayoutParams(0, 1, 1f));
+        versionParams.topMargin = dp(2);
+        titleColumn.addView(version, versionParams);
 
         TextView settingsButton = new TextView(this);
         settingsButton.setText("⚙ 设置");
@@ -559,7 +561,7 @@ public class MainActivity extends AppCompatActivity {
         card.addView(appName, matchWrap());
 
         TextView version = new TextView(this);
-        version.setText("版本 " + appVersionName());
+        version.setText("版本 " + appVersionLabel());
         version.setTextColor(0xFF625F67);
         version.setTextSize(15);
         version.setPadding(dp(8), dp(6), dp(8), dp(8));
@@ -589,6 +591,11 @@ public class MainActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         group.addView(radio, params);
         if (checked) group.check(radio.getId());
+    }
+
+    private String appVersionLabel() {
+        String suffix = BuildConfig.DEBUG && BuildConfig.GIT_DIRTY ? "-dirty" : "";
+        return appVersionName() + " (" + BuildConfig.GIT_COMMIT + suffix + ")";
     }
 
     private String appVersionName() {
