@@ -118,7 +118,8 @@ public class MainActivity extends AppCompatActivity {
                 if (processing) return;
                 if (currentPage == PAGE_ABOUT) showSettingsScreen();
                 else if (currentPage == PAGE_SETTINGS) showMainScreen();
-                else finish();
+                // Keep the current selection and controls, just like pressing Home.
+                else moveTaskToBack(true);
             }
         });
         if (savedInstanceState != null) {
