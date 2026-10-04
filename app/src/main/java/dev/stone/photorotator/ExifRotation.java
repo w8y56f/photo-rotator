@@ -95,12 +95,20 @@ final class ExifRotation {
         }
     }
 
-    static void overwrite(Context context, Uri source, int rotationDegrees) throws Exception {
+    static void overwrite(Context context, Uri source, int rotationDegrees,
+                          boolean updateTimestamp) throws Exception {
         PreparedPhoto prepared = prepare(context, source, rotationDegrees, true);
         ContentResolver resolver = context.getContentResolver();
         Uri writeTarget = prepared.mediaUri.buildUpon().authority(MediaStore.AUTHORITY).build();
         try {
             writeFile(resolver, writeTarget, prepared.rotatedFile);
+            if (updateTimestamp) {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000);
+                if (resolver.update(writeTarget, values, null, null) != 1) {
+                    throw new IllegalStateException("无法更新时间戳");
+                }
+            }
         } catch (Exception writeFailure) {
             try {
                 writeFile(resolver, writeTarget, prepared.sourceFile);

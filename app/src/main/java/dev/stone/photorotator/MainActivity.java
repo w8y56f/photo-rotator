@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.IntentSender;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -30,6 +31,7 @@ import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -50,6 +52,13 @@ public class MainActivity extends AppCompatActivity {
     private static final int MAX_SELECTED_PHOTOS = 50;
     private static final String STATE_SELECTED = "selected_photos";
     private static final String STATE_PICKER_SELECTION = "picker_selection";
+    private static final String PREFS_NAME = "photo_rotator_preferences";
+    private static final String PREF_DEFAULT_ROTATION = "default_rotation";
+    private static final String PREF_DEFAULT_SAVE_MODE = "default_save_mode";
+    private static final String PREF_DEFAULT_TIMESTAMP = "default_timestamp";
+    private static final int PAGE_MAIN = 0;
+    private static final int PAGE_SETTINGS = 1;
+    private static final int PAGE_ABOUT = 2;
     // This extra was introduced in API 36 / R extension 15; compileSdk is currently 35.
     private static final String EXTRA_PICKER_PRE_SELECTION_URIS =
             "android.provider.extra.PICKER_PRE_SELECTION_URIS";
@@ -57,6 +66,10 @@ public class MainActivity extends AppCompatActivity {
     private Button rotateButton;
     private RadioGroup directionGroup;
     private RadioGroup saveModeGroup;
+    private RadioGroup overwriteTimestampGroup;
+    private View mainScreen;
+    private View settingsScreen;
+    private int currentPage = PAGE_MAIN;
     private ProgressBar progress;
     private TextView selectionText;
     private TextView untickAllButton;
@@ -85,6 +98,14 @@ public class MainActivity extends AppCompatActivity {
     @Override protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildScreen();
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                if (processing) return;
+                if (currentPage == PAGE_ABOUT) showSettingsScreen();
+                else if (currentPage == PAGE_SETTINGS) showMainScreen();
+                else finish();
+            }
+        });
         if (savedInstanceState != null) {
             ArrayList<Uri> restored = savedInstanceState.getParcelableArrayList(STATE_SELECTED);
             if (restored != null) selected.addAll(restored);
@@ -191,20 +212,38 @@ public class MainActivity extends AppCompatActivity {
         root.setGravity(Gravity.TOP);
         root.setBackgroundColor(0xFFF7F5FA);
 
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(titleRow, matchWrap());
+
         TextView title = new TextView(this);
         title.setText("Photo Rotator  " + appVersionName());
         title.setTextColor(0xFF1D1B20);
-        title.setTextSize(26);
+        title.setTextSize(24);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        root.addView(title, matchWrap());
+        titleRow.addView(title, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView settingsButton = new TextView(this);
+        settingsButton.setText("⚙ 设置");
+        settingsButton.setTextColor(0xFF6750A4);
+        settingsButton.setTextSize(16);
+        settingsButton.setGravity(Gravity.CENTER);
+        settingsButton.setMinHeight(dp(48));
+        settingsButton.setPadding(dp(8), 0, 0, 0);
+        settingsButton.setContentDescription("设置");
+        settingsButton.setOnClickListener(v -> showSettingsScreen());
+        titleRow.addView(settingsButton, wrapWrap());
 
         addSectionTitle(root, "旋转设置", dp(22));
         LinearLayout directionCard = optionCard();
         directionGroup = new RadioGroup(this);
         directionGroup.setOrientation(RadioGroup.VERTICAL);
-        addRadio(directionGroup, "逆时针90度", -90, true);
-        addRadio(directionGroup, "顺时针90度", 90, false);
-        addRadio(directionGroup, "180度", 180, false);
+        int defaultRotation = defaultPreferences().getInt(PREF_DEFAULT_ROTATION, -90);
+        addRadio(directionGroup, "逆时针90度", -90, defaultRotation == -90);
+        addRadio(directionGroup, "顺时针90度", 90, defaultRotation == 90);
+        addRadio(directionGroup, "180度", 180, defaultRotation == 180);
         directionCard.addView(directionGroup, matchWrap());
         root.addView(directionCard, matchWrap());
 
@@ -212,10 +251,26 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout modeCard = optionCard();
         saveModeGroup = new RadioGroup(this);
         saveModeGroup.setOrientation(RadioGroup.HORIZONTAL);
-        addRadio(saveModeGroup, "覆盖", 1, true);
-        addRadio(saveModeGroup, "另存新图", 0, false);
+        int defaultSaveMode = defaultPreferences().getInt(PREF_DEFAULT_SAVE_MODE, 1);
+        addRadio(saveModeGroup, "覆盖", 1, defaultSaveMode == 1);
+        addRadio(saveModeGroup, "另存新图", 0, defaultSaveMode == 0);
         modeCard.addView(saveModeGroup, matchWrap());
         root.addView(modeCard, matchWrap());
+
+        LinearLayout timestampCard = optionCard();
+        overwriteTimestampGroup = new RadioGroup(this);
+        overwriteTimestampGroup.setOrientation(RadioGroup.VERTICAL);
+        int defaultTimestamp = defaultPreferences().getInt(PREF_DEFAULT_TIMESTAMP, 0);
+        addRadio(overwriteTimestampGroup, "不改时间戳", 0, defaultTimestamp == 0);
+        addRadio(overwriteTimestampGroup, "更新时间戳", 1, defaultTimestamp == 1);
+        timestampCard.addView(overwriteTimestampGroup, matchWrap());
+        timestampCard.setVisibility(View.GONE);
+        LinearLayout.LayoutParams timestampParams = matchWrap();
+        timestampParams.topMargin = dp(8);
+        root.addView(timestampCard, timestampParams);
+        saveModeGroup.setOnCheckedChangeListener((group, checkedId) ->
+                timestampCard.setVisibility(selectedInt(saveModeGroup) == 1 ? View.VISIBLE : View.GONE));
+        timestampCard.setVisibility(selectedInt(saveModeGroup) == 1 ? View.VISIBLE : View.GONE);
 
         LinearLayout actionRow = new LinearLayout(this);
         actionRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -315,7 +370,160 @@ public class MainActivity extends AppCompatActivity {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.addView(root);
-        setContentView(scroll);
+        mainScreen = scroll;
+        setContentView(mainScreen);
+    }
+
+    private SharedPreferences defaultPreferences() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+    }
+
+    private void showSettingsScreen() {
+        if (processing) return;
+        currentPage = PAGE_SETTINGS;
+        settingsScreen = createSettingsScreen();
+        setContentView(settingsScreen);
+    }
+
+    private void showMainScreen() {
+        currentPage = PAGE_MAIN;
+        setContentView(mainScreen);
+    }
+
+    private LinearLayout createPageRoot() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(24), dp(32), dp(24), dp(24));
+        root.setGravity(Gravity.TOP);
+        root.setBackgroundColor(0xFFF7F5FA);
+        return root;
+    }
+
+    private void addPageHeader(LinearLayout root, String title, Runnable onBack) {
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(header, matchWrap());
+
+        TextView backButton = new TextView(this);
+        backButton.setText("‹");
+        backButton.setTextSize(32);
+        backButton.setTextColor(0xFF6750A4);
+        backButton.setGravity(Gravity.CENTER);
+        backButton.setMinWidth(dp(48));
+        backButton.setMinHeight(dp(48));
+        backButton.setContentDescription("返回");
+        backButton.setOnClickListener(v -> onBack.run());
+        header.addView(backButton, wrapWrap());
+
+        TextView heading = new TextView(this);
+        heading.setText(title);
+        heading.setTextColor(0xFF1D1B20);
+        heading.setTextSize(24);
+        heading.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams headingParams = wrapWrap();
+        headingParams.leftMargin = dp(8);
+        header.addView(heading, headingParams);
+    }
+
+    private View createSettingsScreen() {
+        LinearLayout root = createPageRoot();
+        addPageHeader(root, "设置", this::showMainScreen);
+
+        addSectionTitle(root, "默认设置", dp(22));
+        TextView hint = new TextView(this);
+        hint.setText("这些选项会作为主界面的默认值；每次旋转前仍可单独调整。");
+        hint.setTextColor(0xFF625F67);
+        hint.setTextSize(14);
+        LinearLayout.LayoutParams hintParams = matchWrap();
+        hintParams.bottomMargin = dp(10);
+        root.addView(hint, hintParams);
+
+        SharedPreferences preferences = defaultPreferences();
+        RadioGroup rotationDefaults = new RadioGroup(this);
+        rotationDefaults.setOrientation(RadioGroup.VERTICAL);
+        int rotation = preferences.getInt(PREF_DEFAULT_ROTATION, -90);
+        addRadio(rotationDefaults, "逆时针90度", -90, rotation == -90);
+        addRadio(rotationDefaults, "顺时针90度", 90, rotation == 90);
+        addRadio(rotationDefaults, "180度", 180, rotation == 180);
+        addSettingsGroup(root, "旋转设置", rotationDefaults);
+        rotationDefaults.setOnCheckedChangeListener((group, checkedId) ->
+                preferences.edit().putInt(PREF_DEFAULT_ROTATION, selectedInt(rotationDefaults)).apply());
+
+        RadioGroup saveModeDefaults = new RadioGroup(this);
+        saveModeDefaults.setOrientation(RadioGroup.VERTICAL);
+        int saveMode = preferences.getInt(PREF_DEFAULT_SAVE_MODE, 1);
+        addRadio(saveModeDefaults, "覆盖", 1, saveMode == 1);
+        addRadio(saveModeDefaults, "另存新图", 0, saveMode == 0);
+        addSettingsGroup(root, "编辑后保存方式", saveModeDefaults);
+        saveModeDefaults.setOnCheckedChangeListener((group, checkedId) ->
+                preferences.edit().putInt(PREF_DEFAULT_SAVE_MODE, selectedInt(saveModeDefaults)).apply());
+
+        RadioGroup timestampDefaults = new RadioGroup(this);
+        timestampDefaults.setOrientation(RadioGroup.VERTICAL);
+        int timestamp = preferences.getInt(PREF_DEFAULT_TIMESTAMP, 0);
+        addRadio(timestampDefaults, "不改时间戳", 0, timestamp == 0);
+        addRadio(timestampDefaults, "更新时间戳", 1, timestamp == 1);
+        addSettingsGroup(root, "覆盖后图片时间是否更新", timestampDefaults);
+        timestampDefaults.setOnCheckedChangeListener((group, checkedId) ->
+                preferences.edit().putInt(PREF_DEFAULT_TIMESTAMP, selectedInt(timestampDefaults)).apply());
+
+        addSectionTitle(root, "关于", dp(24));
+        LinearLayout aboutCard = optionCard();
+        TextView aboutRow = new TextView(this);
+        aboutRow.setText("关于 Photo Rotator     ›");
+        aboutRow.setTextColor(0xFF1D1B20);
+        aboutRow.setTextSize(16);
+        aboutRow.setGravity(Gravity.CENTER_VERTICAL);
+        aboutRow.setMinHeight(dp(52));
+        aboutRow.setOnClickListener(v -> showAboutScreen());
+        aboutCard.addView(aboutRow, matchWrap());
+        root.addView(aboutCard, matchWrap());
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(root);
+        return scroll;
+    }
+
+    private void addSettingsGroup(LinearLayout root, String title, RadioGroup options) {
+        addSectionTitle(root, title, dp(12));
+        LinearLayout card = optionCard();
+        card.addView(options, matchWrap());
+        root.addView(card, matchWrap());
+    }
+
+    private void showAboutScreen() {
+        currentPage = PAGE_ABOUT;
+        LinearLayout root = createPageRoot();
+        addPageHeader(root, "关于", this::showSettingsScreen);
+
+        LinearLayout card = optionCard();
+        TextView appName = new TextView(this);
+        appName.setText("Photo Rotator");
+        appName.setTextColor(0xFF1D1B20);
+        appName.setTextSize(20);
+        appName.setTypeface(null, android.graphics.Typeface.BOLD);
+        appName.setPadding(dp(8), dp(10), dp(8), dp(8));
+        card.addView(appName, matchWrap());
+
+        TextView version = new TextView(this);
+        version.setText("版本 " + appVersionName());
+        version.setTextColor(0xFF625F67);
+        version.setTextSize(15);
+        version.setPadding(dp(8), dp(6), dp(8), dp(8));
+        card.addView(version, matchWrap());
+
+        TextView attribution = new TextView(this);
+        attribution.setText("Powered by Stone Wang");
+        attribution.setTextColor(0xFF625F67);
+        attribution.setTextSize(14);
+        attribution.setPadding(dp(8), dp(6), dp(8), dp(10));
+        card.addView(attribution, matchWrap());
+        LinearLayout.LayoutParams cardParams = matchWrap();
+        cardParams.topMargin = dp(24);
+        root.addView(card, cardParams);
+        setContentView(root);
     }
 
     private void addRadio(RadioGroup group, String label, int value, boolean checked) {
@@ -585,7 +793,8 @@ public class MainActivity extends AppCompatActivity {
         }
         if (requestCode == REQUEST_OVERWRITE_PERMISSION) {
             if (resultCode == RESULT_OK && pendingItems != null) {
-                processSelection(pendingItems, pendingDegrees, true);
+                processSelection(pendingItems, pendingDegrees, true,
+                        selectedInt(overwriteTimestampGroup) == 1);
             } else {
                 restoreControls();
                 statusText.setText("未获准覆盖照片，原图没有修改。");
@@ -621,14 +830,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private int selectedInt(RadioGroup group) {
-        RadioButton selectedRadio = findViewById(group.getCheckedRadioButtonId());
+        RadioButton selectedRadio = group.findViewById(group.getCheckedRadioButtonId());
         return (Integer) selectedRadio.getTag();
     }
 
     private void continueAfterReadPermission() {
         ArrayList<Uri> items = new ArrayList<>(selected);
         if (pendingOverwrite) requestOverwritePermission(items);
-        else processSelection(items, pendingDegrees, false);
+        else processSelection(items, pendingDegrees, false, false);
     }
 
     private void requestOverwritePermission(ArrayList<Uri> pickerItems) {
@@ -637,6 +846,7 @@ public class MainActivity extends AppCompatActivity {
         chooseButton.setEnabled(false);
         setGroupEnabled(directionGroup, false);
         setGroupEnabled(saveModeGroup, false);
+        setGroupEnabled(overwriteTimestampGroup, false);
         showSelectionPreview();
         progress.setVisibility(View.VISIBLE);
         progress.setMax(pickerItems.size());
@@ -688,7 +898,8 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void processSelection(List<Uri> items, int degrees, boolean overwrite) {
+    private void processSelection(List<Uri> items, int degrees, boolean overwrite,
+                                  boolean updateTimestamp) {
         processing = true;
         previewExpanded = false;
         showSelectionPreview();
@@ -696,6 +907,7 @@ public class MainActivity extends AppCompatActivity {
         chooseButton.setEnabled(false);
         directionGroup.setEnabled(false);
         saveModeGroup.setEnabled(false);
+        overwriteTimestampGroup.setEnabled(false);
         progress.setVisibility(View.VISIBLE);
         progress.setMax(items.size());
         progress.setProgress(0);
@@ -705,7 +917,7 @@ public class MainActivity extends AppCompatActivity {
             List<String> failures = new ArrayList<>();
             for (int i = 0; i < items.size(); i++) {
                 try {
-                    if (overwrite) ExifRotation.overwrite(this, items.get(i), degrees);
+                    if (overwrite) ExifRotation.overwrite(this, items.get(i), degrees, updateTimestamp);
                     else ExifRotation.saveCopy(this, items.get(i), degrees);
                     success++;
                 } catch (Exception e) {
@@ -741,6 +953,7 @@ public class MainActivity extends AppCompatActivity {
         chooseButton.setEnabled(true);
         setGroupEnabled(directionGroup, true);
         setGroupEnabled(saveModeGroup, true);
+        setGroupEnabled(overwriteTimestampGroup, true);
         showSelectionPreview();
     }
 
@@ -770,6 +983,11 @@ public class MainActivity extends AppCompatActivity {
 
     private LinearLayout.LayoutParams matchWrap() {
         return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    private LinearLayout.LayoutParams wrapWrap() {
+        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
     }
 

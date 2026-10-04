@@ -8,6 +8,8 @@ A lightweight Android app that lets you pick photos or share them from a gallery
 
 - **Rotation direction**: 90° counterclockwise (default), 90° clockwise, or 180°.
 - **Save mode**: overwrite the original (default) after Android grants write access, or save a new image to `Pictures/PhotoRotator`.
+- **Overwrite timestamp**: keep the original timestamp (default) or update the photo's modified time in the gallery; this option appears only when overwriting.
+- **Settings and about**: save defaults for rotation, save mode, and overwrite timestamp behavior; the About page shows the app version and attribution.
 - **EXIF information**: common EXIF data is retained, including GPS, camera make/model, and capture time. Pixels are re-encoded; proprietary maker data and embedded thumbnails may not be retained. If an overwrite fails, the app attempts to restore the original file.
 - **Batch processing**: keep up to 50 photos selected at once, with previews, an expanded view, and individual removal before processing.
 - **Share from a gallery**: shared photos appear selected, ready for review before rotation. Sharing more than 50 photos rejects the entire batch and keeps any prior selection. Photos shared by other apps may lack some EXIF; overwrite is unavailable unless the local original can be identified.
