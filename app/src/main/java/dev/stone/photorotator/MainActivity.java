@@ -5,6 +5,7 @@ import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ContentResolver;
+import android.content.res.ColorStateList;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentSender;
@@ -42,6 +43,10 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.exifinterface.media.ExifInterface;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -56,6 +61,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
+    private static final int COLOR_SURFACE = 0xFFF2F5FA;
+    private static final int COLOR_TEXT = 0xFF263449;
+    private static final int COLOR_MUTED = 0xFF637187;
+    private int brandColor;
     private static final int PICK_NATIVE_PHOTOS = 12;
     private static final int REQUEST_ORIGINAL_PHOTOS = 13;
     private static final int REQUEST_OVERWRITE_PERMISSION = 14;
@@ -112,6 +121,15 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        brandColor = getColor(R.color.launcher_background);
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        getWindow().setStatusBarColor(android.graphics.Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(android.graphics.Color.TRANSPARENT);
+        getWindow().setNavigationBarContrastEnforced(false);
+        WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView())
+                .setAppearanceLightStatusBars(false);
+        WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView())
+                .setAppearanceLightNavigationBars(false);
         buildScreen();
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override public void handleOnBackPressed() {
@@ -232,17 +250,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void buildScreen() {
-        int pad = dp(24);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(pad, dp(32), pad, pad);
-        root.setGravity(Gravity.TOP);
-        root.setBackgroundColor(0xFFF7F5FA);
+        LinearLayout root = createPageRoot();
 
         LinearLayout titleRow = new LinearLayout(this);
         titleRow.setOrientation(LinearLayout.HORIZONTAL);
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        root.addView(titleRow, matchWrap());
+        stylePageHeader(titleRow);
 
         LinearLayout titleColumn = new LinearLayout(this);
         titleColumn.setOrientation(LinearLayout.VERTICAL);
@@ -251,14 +264,14 @@ public class MainActivity extends AppCompatActivity {
 
         TextView title = new TextView(this);
         title.setText("Photo Rotator");
-        title.setTextColor(0xFF1D1B20);
-        title.setTextSize(24);
+        title.setTextColor(0xFFFFFFFF);
+        title.setTextSize(28);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         titleColumn.addView(title, wrapWrap());
 
         TextView version = new TextView(this);
         version.setText(appVersionLabel());
-        version.setTextColor(0xFF8A8790);
+        version.setTextColor(0xFFDCE6FF);
         version.setTextSize(14);
         LinearLayout.LayoutParams versionParams = wrapWrap();
         versionParams.topMargin = dp(2);
@@ -266,7 +279,7 @@ public class MainActivity extends AppCompatActivity {
 
         TextView settingsButton = new TextView(this);
         settingsButton.setText("⚙ 设置");
-        settingsButton.setTextColor(0xFF6750A4);
+        settingsButton.setTextColor(0xFFFFFFFF);
         settingsButton.setTextSize(16);
         settingsButton.setGravity(Gravity.CENTER);
         settingsButton.setMinHeight(dp(48));
@@ -319,6 +332,7 @@ public class MainActivity extends AppCompatActivity {
 
         chooseButton = new Button(this);
         chooseButton.setText("选择照片");
+        styleActionButton(chooseButton, false);
         LinearLayout.LayoutParams chooseParams = new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         chooseParams.rightMargin = dp(6);
@@ -327,6 +341,7 @@ public class MainActivity extends AppCompatActivity {
 
         rotateButton = new Button(this);
         rotateButton.setText("旋转");
+        styleActionButton(rotateButton, true);
         rotateButton.setEnabled(false);
         LinearLayout.LayoutParams rotateParams = new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -336,7 +351,7 @@ public class MainActivity extends AppCompatActivity {
 
         TextView metadataHint = new TextView(this);
         metadataHint.setText("不会修改 EXIF 信息（如位置、设备等）");
-        metadataHint.setTextColor(0xFF625F67);
+        metadataHint.setTextColor(COLOR_MUTED);
         metadataHint.setTextSize(12);
         metadataHint.setGravity(Gravity.END);
         LinearLayout.LayoutParams metadataParams = matchWrap();
@@ -352,14 +367,14 @@ public class MainActivity extends AppCompatActivity {
 
         selectionText = new TextView(this);
         selectionText.setText("尚未选择照片");
-        selectionText.setTextColor(0xFF1D1B20);
+        selectionText.setTextColor(COLOR_TEXT);
         selectionText.setTextSize(16);
         selectionRow.addView(selectionText, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         untickAllButton = new TextView(this);
         untickAllButton.setText("Untick All");
-        untickAllButton.setTextColor(0xFF6750A4);
+        untickAllButton.setTextColor(brandColor);
         untickAllButton.setTextSize(14);
         untickAllButton.setGravity(Gravity.CENTER);
         untickAllButton.setPadding(dp(12), dp(8), dp(4), dp(8));
@@ -375,7 +390,7 @@ public class MainActivity extends AppCompatActivity {
 
         collapsePreviewButton = new TextView(this);
         collapsePreviewButton.setText("收起");
-        collapsePreviewButton.setTextColor(0xFF6750A4);
+        collapsePreviewButton.setTextColor(brandColor);
         collapsePreviewButton.setTextSize(14);
         collapsePreviewButton.setGravity(Gravity.CENTER);
         collapsePreviewButton.setPadding(dp(12), dp(8), dp(4), dp(8));
@@ -400,17 +415,56 @@ public class MainActivity extends AppCompatActivity {
         root.addView(progress, progressParams);
 
         statusText = new TextView(this);
-        statusText.setTextColor(0xFF625F67);
+        statusText.setTextColor(COLOR_MUTED);
         statusText.setTextSize(14);
         LinearLayout.LayoutParams statusParams = matchWrap();
         statusParams.topMargin = dp(10);
         root.addView(statusText, statusParams);
 
+        mainScreen = createScreen(titleRow, root);
+        setContentView(mainScreen);
+    }
+
+    private void stylePageHeader(LinearLayout header) {
+        header.setBackgroundColor(brandColor);
+        header.setPadding(dp(24), dp(22), dp(24), dp(24));
+        header.setMinimumHeight(dp(112));
+    }
+
+    // Own both system-bar insets so Android 15's edge-to-edge layout keeps the
+    // blue header and footer behind system icons without covering any controls.
+    private View createScreen(LinearLayout header, LinearLayout content) {
+        LinearLayout screen = new LinearLayout(this);
+        screen.setOrientation(LinearLayout.VERTICAL);
+        screen.setBackgroundColor(brandColor);
+        screen.addView(header, matchWrap());
+
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        scroll.addView(root);
-        mainScreen = scroll;
-        setContentView(mainScreen);
+        scroll.setBackgroundColor(COLOR_SURFACE);
+        scroll.setClipToPadding(false);
+        scroll.addView(content);
+        screen.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        ViewCompat.setOnApplyWindowInsetsListener(screen, (view, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars()
+                    | WindowInsetsCompat.Type.displayCutout());
+            view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, dp(12)));
+            return WindowInsetsCompat.CONSUMED;
+        });
+        return screen;
+    }
+
+    private void styleActionButton(Button button, boolean primary) {
+        int enabledBackground = primary ? brandColor : 0xFFE0E9FA;
+        button.setBackgroundTintList(new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_enabled}, new int[]{}},
+                new int[]{enabledBackground, 0xFFE2E7EF}));
+        button.setTextColor(new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_enabled}, new int[]{}},
+                new int[]{primary ? 0xFFFFFFFF : brandColor, 0xFF8995A7}));
+        button.setMinHeight(dp(52));
+        button.setAllCaps(false);
     }
 
     private SharedPreferences defaultPreferences() {
@@ -432,22 +486,22 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout createPageRoot() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(24), dp(32), dp(24), dp(24));
+        root.setPadding(dp(20), dp(4), dp(20), dp(24));
         root.setGravity(Gravity.TOP);
-        root.setBackgroundColor(0xFFF7F5FA);
+        root.setBackgroundColor(COLOR_SURFACE);
         return root;
     }
 
-    private void addPageHeader(LinearLayout root, String title, Runnable onBack) {
+    private LinearLayout createPageHeader(String title, Runnable onBack) {
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        root.addView(header, matchWrap());
+        stylePageHeader(header);
 
         TextView backButton = new TextView(this);
         backButton.setText("‹");
         backButton.setTextSize(32);
-        backButton.setTextColor(0xFF6750A4);
+        backButton.setTextColor(0xFFFFFFFF);
         backButton.setGravity(Gravity.CENTER);
         backButton.setMinWidth(dp(48));
         backButton.setMinHeight(dp(48));
@@ -457,22 +511,23 @@ public class MainActivity extends AppCompatActivity {
 
         TextView heading = new TextView(this);
         heading.setText(title);
-        heading.setTextColor(0xFF1D1B20);
+        heading.setTextColor(0xFFFFFFFF);
         heading.setTextSize(24);
         heading.setTypeface(null, android.graphics.Typeface.BOLD);
         LinearLayout.LayoutParams headingParams = wrapWrap();
         headingParams.leftMargin = dp(8);
         header.addView(heading, headingParams);
+        return header;
     }
 
     private View createSettingsScreen() {
         LinearLayout root = createPageRoot();
-        addPageHeader(root, "设置", this::showMainScreen);
+        LinearLayout header = createPageHeader("设置", this::showMainScreen);
 
         addSectionTitle(root, "默认设置", dp(22));
         TextView hint = new TextView(this);
         hint.setText("这些选项会作为主界面的默认值；每次旋转前仍可单独调整。");
-        hint.setTextColor(0xFF625F67);
+        hint.setTextColor(COLOR_MUTED);
         hint.setTextSize(14);
         LinearLayout.LayoutParams hintParams = matchWrap();
         hintParams.bottomMargin = dp(10);
@@ -514,7 +569,7 @@ public class MainActivity extends AppCompatActivity {
             permissionRow.setText(MediaStore.canManageMedia(this)
                     ? "免确认修改照片：已开启\n点击管理系统授权"
                     : "免确认修改照片：未开启\n开启系统的媒体管理授权后，覆盖照片无需逐次确认");
-            permissionRow.setTextColor(0xFF1D1B20);
+            permissionRow.setTextColor(COLOR_TEXT);
             permissionRow.setTextSize(15);
             permissionRow.setPadding(dp(4), dp(12), dp(4), dp(12));
             permissionRow.setOnClickListener(v -> openMediaManagementSettings(false));
@@ -526,7 +581,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout aboutCard = optionCard();
         TextView aboutRow = new TextView(this);
         aboutRow.setText("关于 Photo Rotator     ›");
-        aboutRow.setTextColor(0xFF1D1B20);
+        aboutRow.setTextColor(COLOR_TEXT);
         aboutRow.setTextSize(16);
         aboutRow.setGravity(Gravity.CENTER_VERTICAL);
         aboutRow.setMinHeight(dp(52));
@@ -534,10 +589,7 @@ public class MainActivity extends AppCompatActivity {
         aboutCard.addView(aboutRow, matchWrap());
         root.addView(aboutCard, matchWrap());
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.addView(root);
-        return scroll;
+        return createScreen(header, root);
     }
 
     private void addSettingsGroup(LinearLayout root, String title, RadioGroup options) {
@@ -550,12 +602,12 @@ public class MainActivity extends AppCompatActivity {
     private void showAboutScreen() {
         currentPage = PAGE_ABOUT;
         LinearLayout root = createPageRoot();
-        addPageHeader(root, "关于", this::showSettingsScreen);
+        LinearLayout header = createPageHeader("关于", this::showSettingsScreen);
 
         LinearLayout card = optionCard();
         TextView appName = new TextView(this);
         appName.setText("Photo Rotator");
-        appName.setTextColor(0xFF1D1B20);
+        appName.setTextColor(COLOR_TEXT);
         appName.setTextSize(20);
         appName.setTypeface(null, android.graphics.Typeface.BOLD);
         appName.setPadding(dp(8), dp(10), dp(8), dp(8));
@@ -563,27 +615,31 @@ public class MainActivity extends AppCompatActivity {
 
         TextView version = new TextView(this);
         version.setText("版本 " + appVersionLabel());
-        version.setTextColor(0xFF625F67);
+        version.setTextColor(COLOR_MUTED);
         version.setTextSize(15);
         version.setPadding(dp(8), dp(6), dp(8), dp(8));
         card.addView(version, matchWrap());
 
         TextView attribution = new TextView(this);
         attribution.setText("Powered by Stone Wang");
-        attribution.setTextColor(0xFF625F67);
+        attribution.setTextColor(COLOR_MUTED);
         attribution.setTextSize(14);
         attribution.setPadding(dp(8), dp(6), dp(8), dp(10));
         card.addView(attribution, matchWrap());
         LinearLayout.LayoutParams cardParams = matchWrap();
         cardParams.topMargin = dp(24);
         root.addView(card, cardParams);
-        setContentView(root);
+        setContentView(createScreen(header, root));
     }
 
     private void addRadio(RadioGroup group, String label, int value, boolean checked) {
         RadioButton radio = new RadioButton(this);
         radio.setId(View.generateViewId());
         radio.setText(label);
+        radio.setTextColor(COLOR_TEXT);
+        radio.setButtonTintList(new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{brandColor, COLOR_MUTED}));
         radio.setTag(value);
         radio.setMinHeight(dp(48));
         RadioGroup.LayoutParams params = group.getOrientation() == RadioGroup.HORIZONTAL
@@ -611,7 +667,7 @@ public class MainActivity extends AppCompatActivity {
     private void addSectionTitle(LinearLayout root, String label, int topMargin) {
         TextView header = new TextView(this);
         header.setText(label);
-        header.setTextColor(0xFF49454F);
+        header.setTextColor(brandColor);
         header.setTextSize(16);
         header.setTypeface(null, android.graphics.Typeface.BOLD);
         LinearLayout.LayoutParams params = matchWrap();
@@ -626,7 +682,7 @@ public class MainActivity extends AppCompatActivity {
         card.setPadding(dp(12), dp(6), dp(12), dp(6));
         GradientDrawable background = new GradientDrawable();
         background.setColor(0xFFFFFFFF);
-        background.setCornerRadius(dp(16));
+        background.setCornerRadius(dp(20));
         card.setBackground(background);
         return card;
     }
@@ -684,7 +740,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateSelection() {
         updatedPhotoSources.keySet().retainAll(selected);
-        statusText.setTextColor(0xFF625F67);
+        statusText.setTextColor(COLOR_MUTED);
         selectionText.setText(selected.isEmpty() ? "尚未选择照片" : "已选择 " + selected.size() + " 张照片");
         rotateButton.setEnabled(!selected.isEmpty());
         if (selected.size() <= 8) previewExpanded = false;
@@ -716,7 +772,7 @@ public class MainActivity extends AppCompatActivity {
         if (!previewExpanded && selected.size() > 8) {
             FrameLayout moreTile = previewTile(tileSize, gap, 7);
             GradientDrawable moreBackground = new GradientDrawable();
-            moreBackground.setColor(0xFF6750A4);
+            moreBackground.setColor(brandColor);
             moreBackground.setCornerRadius(dp(10));
             moreTile.setBackground(moreBackground);
             TextView more = new TextView(this);
@@ -751,7 +807,7 @@ public class MainActivity extends AppCompatActivity {
         TextView remove = new TextView(this);
         remove.setText("×");
         remove.setTextSize(11);
-        remove.setTextColor(0xFF1D1B20);
+        remove.setTextColor(COLOR_TEXT);
         remove.setGravity(Gravity.CENTER);
         GradientDrawable removeBackground = new GradientDrawable();
         removeBackground.setColor(0xEFFFFFFF);
@@ -833,7 +889,7 @@ public class MainActivity extends AppCompatActivity {
     private FrameLayout previewTile(int size, int gap, int index) {
         FrameLayout tile = new FrameLayout(this);
         GradientDrawable background = new GradientDrawable();
-        background.setColor(0xFFE7E0EC);
+        background.setColor(0xFFE2EAF6);
         background.setCornerRadius(dp(10));
         tile.setBackground(background);
         tile.setClipToOutline(true);
@@ -984,7 +1040,7 @@ public class MainActivity extends AppCompatActivity {
         progress.setVisibility(View.VISIBLE);
         progress.setMax(pickerItems.size());
         progress.setProgress(0);
-        statusText.setTextColor(0xFF625F67);
+        statusText.setTextColor(COLOR_MUTED);
         statusText.setText("正在确认分享照片与本机原图…");
         worker.execute(() -> {
             try {
@@ -1063,7 +1119,7 @@ public class MainActivity extends AppCompatActivity {
         progress.setMax(items.size());
         progress.setProgress(0);
         statusText.setText("准备处理 " + items.size() + " 张照片…");
-        statusText.setTextColor(0xFF625F67);
+        statusText.setTextColor(COLOR_MUTED);
         worker.execute(() -> {
             int success = 0;
             List<String> failures = new ArrayList<>();
