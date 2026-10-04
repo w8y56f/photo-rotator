@@ -8,10 +8,13 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.system.Os;
+import android.system.StructStat;
 
 import androidx.exifinterface.media.ExifInterface;
 
@@ -23,6 +26,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /** Rotates the image pixels and carries the source EXIF into the new photo. */
 final class ExifRotation {
@@ -101,21 +106,21 @@ final class ExifRotation {
         ContentResolver resolver = context.getContentResolver();
         Uri writeTarget = prepared.mediaUri.buildUpon().authority(MediaStore.AUTHORITY).build();
         try {
-            writeFile(resolver, writeTarget, prepared.rotatedFile);
-            if (updateTimestamp) {
-                ContentValues values = new ContentValues();
-                values.put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000);
-                if (resolver.update(writeTarget, values, null, null) != 1) {
-                    throw new IllegalStateException("无法更新时间戳");
-                }
-            }
-        } catch (Exception writeFailure) {
+            long originalTimestamp = readModifiedTime(resolver, writeTarget);
+            String path = readMediaPath(resolver, writeTarget);
             try {
-                writeFile(resolver, writeTarget, prepared.sourceFile);
-            } catch (Exception restoreFailure) {
-                writeFailure.addSuppressed(restoreFailure);
+                long timestamp = updateTimestamp ? System.currentTimeMillis() : originalTimestamp;
+                writeFile(resolver, writeTarget, prepared.rotatedFile, timestamp);
+                scanAndVerifyTimestamp(context, writeTarget, path, timestamp);
+            } catch (Exception writeFailure) {
+                try {
+                    writeFile(resolver, writeTarget, prepared.sourceFile, originalTimestamp);
+                    scanAndVerifyTimestamp(context, writeTarget, path, originalTimestamp);
+                } catch (Exception restoreFailure) {
+                    writeFailure.addSuppressed(restoreFailure);
+                }
+                throw writeFailure;
             }
-            throw writeFailure;
         } finally {
             prepared.cleanup();
         }
@@ -219,7 +224,44 @@ final class ExifRotation {
         while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
     }
 
-    private static void writeFile(ContentResolver resolver, Uri destination, File source) throws Exception {
+    private static long readModifiedTime(ContentResolver resolver, Uri source) throws Exception {
+        try (ParcelFileDescriptor descriptor = resolver.openFileDescriptor(source, "r")) {
+            if (descriptor == null) throw new IllegalStateException("无法读取原照片时间");
+            StructStat stat = Os.fstat(descriptor.getFileDescriptor());
+            return stat.st_mtim.tv_sec * 1000 + stat.st_mtim.tv_nsec / 1000000;
+        }
+    }
+
+    private static String readMediaPath(ContentResolver resolver, Uri source) {
+        try (Cursor cursor = resolver.query(source, new String[]{MediaStore.MediaColumns.DATA},
+                null, null, null)) {
+            if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) {
+                String path = cursor.getString(0);
+                if (path != null && !path.isEmpty()) return path;
+            }
+        }
+        throw new IllegalStateException("无法读取原照片路径以同步相册时间");
+    }
+
+    private static void scanAndVerifyTimestamp(Context context, Uri source, String path,
+                                               long timestamp) throws Exception {
+        CountDownLatch scanned = new CountDownLatch(1);
+        MediaScannerConnection.scanFile(context, new String[]{path}, null,
+                (scannedPath, scannedUri) -> scanned.countDown());
+        if (!scanned.await(30, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("同步相册时间超时");
+        }
+        try (Cursor cursor = context.getContentResolver().query(source,
+                new String[]{MediaStore.MediaColumns.DATE_MODIFIED}, null, null, null)) {
+            if (cursor == null || !cursor.moveToFirst() || cursor.isNull(0)
+                    || cursor.getLong(0) != timestamp / 1000) {
+                throw new IllegalStateException("相册未能同步照片时间");
+            }
+        }
+    }
+
+    private static void writeFile(ContentResolver resolver, Uri destination, File source,
+                                  long timestamp) throws Exception {
         try (ParcelFileDescriptor descriptor = resolver.openFileDescriptor(destination, "rwt")) {
             if (descriptor == null) throw new IllegalStateException("无法打开原照片以写入");
             try (FileOutputStream output = new FileOutputStream(descriptor.getFileDescriptor());
@@ -229,6 +271,11 @@ final class ExifRotation {
                 while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
                 output.flush();
                 output.getFD().sync();
+                File descriptorPath = new File("/proc/self/fd/" + descriptor.getFd());
+                if (!descriptorPath.setLastModified(timestamp)
+                        || Os.fstat(descriptor.getFileDescriptor()).st_mtime != timestamp / 1000) {
+                    throw new IllegalStateException("无法设置照片修改时间");
+                }
             }
         }
     }

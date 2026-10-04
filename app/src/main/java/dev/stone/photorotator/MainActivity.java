@@ -218,12 +218,22 @@ public class MainActivity extends AppCompatActivity {
         root.addView(titleRow, matchWrap());
 
         TextView title = new TextView(this);
-        title.setText("Photo Rotator  " + appVersionName());
+        title.setText("Photo Rotator");
         title.setTextColor(0xFF1D1B20);
         title.setTextSize(24);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        titleRow.addView(title, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        titleRow.addView(title, wrapWrap());
+
+        TextView version = new TextView(this);
+        version.setText(appVersionName());
+        version.setTextColor(0xFF8A8790);
+        version.setTextSize(14);
+        LinearLayout.LayoutParams versionParams = wrapWrap();
+        versionParams.leftMargin = dp(8);
+        titleRow.addView(version, versionParams);
+
+        View titleSpacer = new View(this);
+        titleRow.addView(titleSpacer, new LinearLayout.LayoutParams(0, 1, 1f));
 
         TextView settingsButton = new TextView(this);
         settingsButton.setText("⚙ 设置");
