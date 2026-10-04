@@ -100,7 +100,7 @@ final class ExifRotation {
         }
     }
 
-    static void overwrite(Context context, Uri source, int rotationDegrees,
+    static Uri overwrite(Context context, Uri source, int rotationDegrees,
                           boolean updateTimestamp) throws Exception {
         PreparedPhoto prepared = prepare(context, source, rotationDegrees, true);
         ContentResolver resolver = context.getContentResolver();
@@ -121,6 +121,7 @@ final class ExifRotation {
                 }
                 throw writeFailure;
             }
+            return writeTarget;
         } finally {
             prepared.cleanup();
         }

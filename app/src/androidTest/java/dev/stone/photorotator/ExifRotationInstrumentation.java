@@ -121,6 +121,9 @@ public class ExifRotationInstrumentation extends Instrumentation {
             values.put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/PhotoRotator");
             fixture = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
             require(fixture != null, "Cannot create fixture");
+            require(MainActivity.canWritePhoto(getTargetContext(), fixture),
+                    "Writable photo should not need a confirmation request");
+            result.putBoolean("existing_write_access_passed", true);
             Bitmap bitmap = Bitmap.createBitmap(40, 20, Bitmap.Config.ARGB_8888);
             bitmap.eraseColor(0xff4285f4);
             try (OutputStream output = resolver.openOutputStream(fixture, "wt")) {
@@ -146,7 +149,16 @@ public class ExifRotationInstrumentation extends Instrumentation {
             require(scanned.await(30, TimeUnit.SECONDS), "Fixture scan timed out");
             Long[] before = mediaDates(resolver, fixture);
             require(Objects.equals(before[0], historicalTime / 1000), "Fixture date not indexed");
-            ExifRotation.overwrite(getTargetContext(), fixture, 90, false);
+            Bitmap originalPreview = MainActivity.loadFreshThumbnail(resolver, fixture, 16);
+            require(originalPreview.getWidth() == 32 && originalPreview.getHeight() == 16,
+                    "Original preview dimensions are wrong");
+            originalPreview.recycle();
+            Uri updatedSource = ExifRotation.overwrite(getTargetContext(), fixture, 90, false);
+            require(fixture.equals(updatedSource), "Overwrite returned the wrong preview source");
+            Bitmap updatedPreview = MainActivity.loadFreshThumbnail(resolver, updatedSource, 16);
+            require(updatedPreview.getWidth() == 16 && updatedPreview.getHeight() == 32,
+                    "Preview did not reflect the overwritten pixels");
+            updatedPreview.recycle();
             require(Arrays.equals(before, mediaDates(resolver, fixture)), "Keep mode changed gallery dates");
             try (ParcelFileDescriptor descriptor = resolver.openFileDescriptor(fixture, "r")) {
                 require(descriptor != null && Os.fstat(descriptor.getFileDescriptor()).st_mtime
@@ -154,7 +166,12 @@ public class ExifRotationInstrumentation extends Instrumentation {
             }
             result.putBoolean("keep_timestamp_passed", true);
             long start = System.currentTimeMillis() / 1000;
-            ExifRotation.overwrite(getTargetContext(), fixture, 90, true);
+            updatedSource = ExifRotation.overwrite(getTargetContext(), updatedSource, 90, true);
+            Bitmap repeatedPreview = MainActivity.loadFreshThumbnail(resolver, updatedSource, 16);
+            require(repeatedPreview.getWidth() == 32 && repeatedPreview.getHeight() == 16,
+                    "Preview did not reflect a repeated overwrite");
+            repeatedPreview.recycle();
+            result.putBoolean("fresh_overwrite_preview_passed", true);
             Long[] after = mediaDates(resolver, fixture);
             require(after[0] != null && after[0] >= start
                     && after[0] <= System.currentTimeMillis() / 1000, "Update mode did not update time");

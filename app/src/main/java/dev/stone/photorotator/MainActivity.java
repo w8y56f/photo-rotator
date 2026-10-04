@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.ContentResolver;
+import android.content.Context;
 import android.content.Intent;
 import android.content.IntentSender;
 import android.content.SharedPreferences;
@@ -11,8 +13,11 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Process;
 import android.os.ext.SdkExtensions;
 import android.provider.MediaStore;
+import android.provider.Settings;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.util.LruCache;
 import android.view.Gravity;
@@ -30,6 +35,7 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.Nullable;
@@ -38,10 +44,14 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.exifinterface.media.ExifInterface;
 
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
+import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -49,13 +59,16 @@ public class MainActivity extends AppCompatActivity {
     private static final int PICK_NATIVE_PHOTOS = 12;
     private static final int REQUEST_ORIGINAL_PHOTOS = 13;
     private static final int REQUEST_OVERWRITE_PERMISSION = 14;
+    private static final int REQUEST_MEDIA_MANAGEMENT = 15;
     private static final int MAX_SELECTED_PHOTOS = 50;
     private static final String STATE_SELECTED = "selected_photos";
     private static final String STATE_PICKER_SELECTION = "picker_selection";
+    private static final String STATE_PREVIEW_SOURCES = "preview_sources";
     private static final String PREFS_NAME = "photo_rotator_preferences";
     private static final String PREF_DEFAULT_ROTATION = "default_rotation";
     private static final String PREF_DEFAULT_SAVE_MODE = "default_save_mode";
     private static final String PREF_DEFAULT_TIMESTAMP = "default_timestamp";
+    private static final String PREF_MEDIA_MANAGEMENT_OFFERED = "media_management_offered";
     private static final int PAGE_MAIN = 0;
     private static final int PAGE_SETTINGS = 1;
     private static final int PAGE_ABOUT = 2;
@@ -86,6 +99,7 @@ public class MainActivity extends AppCompatActivity {
     };
     private volatile int previewGeneration;
     private final ArrayList<Uri> selected = new ArrayList<>();
+    private final Map<Uri, Uri> updatedPhotoSources = new HashMap<>();
     private boolean previewExpanded;
     private boolean pickerResultReplacesSelection;
     private boolean selectedUrisFromPhotoPicker = true;
@@ -94,6 +108,7 @@ public class MainActivity extends AppCompatActivity {
     private ArrayList<Uri> pendingItems;
     private int pendingDegrees;
     private boolean pendingOverwrite;
+    private boolean resumeRotationAfterMediaManagement;
 
     @Override protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -109,6 +124,14 @@ public class MainActivity extends AppCompatActivity {
         if (savedInstanceState != null) {
             ArrayList<Uri> restored = savedInstanceState.getParcelableArrayList(STATE_SELECTED);
             if (restored != null) selected.addAll(restored);
+            ArrayList<Uri> restoredSources = savedInstanceState.getParcelableArrayList(STATE_PREVIEW_SOURCES);
+            if (restoredSources != null && restoredSources.size() == selected.size()) {
+                for (int index = 0; index < selected.size(); index++) {
+                    if (restoredSources.get(index) != null) {
+                        updatedPhotoSources.put(selected.get(index), restoredSources.get(index));
+                    }
+                }
+            }
             selectedUrisFromPhotoPicker = savedInstanceState.getBoolean(STATE_PICKER_SELECTION, true);
             updateSelection();
         } else {
@@ -124,6 +147,9 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onSaveInstanceState(Bundle outState) {
         outState.putParcelableArrayList(STATE_SELECTED, new ArrayList<>(selected));
+        ArrayList<Uri> previewSources = new ArrayList<>();
+        for (Uri uri : selected) previewSources.add(updatedPhotoSources.get(uri));
+        outState.putParcelableArrayList(STATE_PREVIEW_SOURCES, previewSources);
         outState.putBoolean(STATE_PICKER_SELECTION, selectedUrisFromPhotoPicker);
         super.onSaveInstanceState(outState);
     }
@@ -478,6 +504,21 @@ public class MainActivity extends AppCompatActivity {
         timestampDefaults.setOnCheckedChangeListener((group, checkedId) ->
                 preferences.edit().putInt(PREF_DEFAULT_TIMESTAMP, selectedInt(timestampDefaults)).apply());
 
+        if (Build.VERSION.SDK_INT >= 31) {
+            addSectionTitle(root, "照片修改权限", dp(24));
+            LinearLayout permissionCard = optionCard();
+            TextView permissionRow = new TextView(this);
+            permissionRow.setText(MediaStore.canManageMedia(this)
+                    ? "免确认修改照片：已开启\n点击管理系统授权"
+                    : "免确认修改照片：未开启\n开启系统的媒体管理授权后，覆盖照片无需逐次确认");
+            permissionRow.setTextColor(0xFF1D1B20);
+            permissionRow.setTextSize(15);
+            permissionRow.setPadding(dp(4), dp(12), dp(4), dp(12));
+            permissionRow.setOnClickListener(v -> openMediaManagementSettings(false));
+            permissionCard.addView(permissionRow, matchWrap());
+            root.addView(permissionCard, matchWrap());
+        }
+
         addSectionTitle(root, "关于", dp(24));
         LinearLayout aboutCard = optionCard();
         TextView aboutRow = new TextView(this);
@@ -634,6 +675,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateSelection() {
+        updatedPhotoSources.keySet().retainAll(selected);
+        statusText.setTextColor(0xFF625F67);
         selectionText.setText(selected.isEmpty() ? "尚未选择照片" : "已选择 " + selected.size() + " 张照片");
         rotateButton.setEnabled(!selected.isEmpty());
         if (selected.size() <= 8) previewExpanded = false;
@@ -723,6 +766,7 @@ public class MainActivity extends AppCompatActivity {
         previewGrid.addView(tile);
 
         String key = uri.toString();
+        Uri updatedSource = updatedPhotoSources.get(uri);
         Bitmap cached = thumbnailCache.get(key);
         if (cached != null) {
             image.setImageBitmap(cached);
@@ -731,8 +775,9 @@ public class MainActivity extends AppCompatActivity {
         previewWorker.execute(() -> {
             if (generation != previewGeneration) return;
             try {
-                Bitmap thumbnail = getContentResolver().loadThumbnail(
-                        uri, new Size(tileSize, tileSize), null);
+                Bitmap thumbnail = updatedSource != null
+                        ? loadFreshThumbnail(getContentResolver(), updatedSource, tileSize)
+                        : getContentResolver().loadThumbnail(uri, new Size(tileSize, tileSize), null);
                 if (thumbnail == null) return;
                 runOnUiThread(() -> {
                     if (generation == previewGeneration) {
@@ -746,6 +791,35 @@ public class MainActivity extends AppCompatActivity {
                 Log.w("PhotoRotator", "Could not load selected photo thumbnail", e);
             }
         });
+    }
+
+    static Bitmap loadFreshThumbnail(ContentResolver resolver, Uri source, int size) throws Exception {
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        try (InputStream input = resolver.openInputStream(source)) {
+            if (input == null) throw new IllegalStateException("无法读取最新照片预览");
+            BitmapFactory.decodeStream(input, null, options);
+        }
+        if (options.outWidth <= 0 || options.outHeight <= 0) {
+            throw new IllegalStateException("无法解码最新照片预览");
+        }
+        options.inSampleSize = 1;
+        while (Math.min(options.outWidth, options.outHeight) / (options.inSampleSize * 2) >= size) {
+            options.inSampleSize *= 2;
+        }
+        options.inJustDecodeBounds = false;
+        Bitmap decoded;
+        try (InputStream input = resolver.openInputStream(source)) {
+            if (input == null) throw new IllegalStateException("无法读取最新照片预览");
+            decoded = BitmapFactory.decodeStream(input, null, options);
+        }
+        if (decoded == null) throw new IllegalStateException("无法解码最新照片预览");
+        float scale = Math.min(1f, (float) size / Math.min(decoded.getWidth(), decoded.getHeight()));
+        Bitmap thumbnail = Bitmap.createScaledBitmap(decoded,
+                Math.max(1, Math.round(decoded.getWidth() * scale)),
+                Math.max(1, Math.round(decoded.getHeight() * scale)), true);
+        if (thumbnail != decoded) decoded.recycle();
+        return thumbnail;
     }
 
     private FrameLayout previewTile(int size, int gap, int index) {
@@ -766,6 +840,16 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_MEDIA_MANAGEMENT) {
+            boolean resumeRotation = resumeRotationAfterMediaManagement;
+            resumeRotationAfterMediaManagement = false;
+            if (resumeRotation && pendingItems != null) {
+                requestOverwritePermission(pendingItems, false);
+            } else if (currentPage == PAGE_SETTINGS) {
+                showSettingsScreen();
+            }
+            return;
+        }
         if (requestCode == PICK_NATIVE_PHOTOS) {
             if (resultCode != RESULT_OK || data == null) return;
             boolean wasEmpty = selected.isEmpty();
@@ -851,6 +935,37 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void requestOverwritePermission(ArrayList<Uri> pickerItems) {
+        requestOverwritePermission(pickerItems, true);
+    }
+
+    private void openMediaManagementSettings(boolean resumeRotation) {
+        if (Build.VERSION.SDK_INT < 31) return;
+        resumeRotationAfterMediaManagement = resumeRotation;
+        defaultPreferences().edit().putBoolean(PREF_MEDIA_MANAGEMENT_OFFERED, true).apply();
+        try {
+            Intent intent = new Intent(Settings.ACTION_REQUEST_MANAGE_MEDIA,
+                    Uri.parse("package:" + getPackageName()));
+            startActivityForResult(intent, REQUEST_MEDIA_MANAGEMENT);
+        } catch (ActivityNotFoundException | SecurityException e) {
+            resumeRotationAfterMediaManagement = false;
+            if (resumeRotation && pendingItems != null) requestOverwritePermission(pendingItems, false);
+            else Toast.makeText(this, "系统未提供媒体管理授权入口", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    static boolean canWritePhoto(Context context, Uri uri) {
+        if (context.checkUriPermission(uri, Process.myPid(), Process.myUid(),
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION) == PackageManager.PERMISSION_GRANTED) return true;
+        try (ParcelFileDescriptor descriptor = context.getContentResolver().openFileDescriptor(uri, "rw")) {
+            return descriptor != null;
+        } catch (java.io.IOException | SecurityException e) {
+            return false;
+        }
+    }
+
+    private void requestOverwritePermission(ArrayList<Uri> pickerItems, boolean requestMediaManagement) {
+        ArrayList<Uri> sources = new ArrayList<>();
+        for (Uri uri : pickerItems) sources.add(updatedPhotoSources.getOrDefault(uri, uri));
         processing = true;
         rotateButton.setEnabled(false);
         chooseButton.setEnabled(false);
@@ -861,22 +976,38 @@ public class MainActivity extends AppCompatActivity {
         progress.setVisibility(View.VISIBLE);
         progress.setMax(pickerItems.size());
         progress.setProgress(0);
+        statusText.setTextColor(0xFF625F67);
         statusText.setText("正在确认分享照片与本机原图…");
         worker.execute(() -> {
             try {
                 ArrayList<Uri> mediaItems = new ArrayList<>();
                 for (int i = 0; i < pickerItems.size(); i++) {
-                    Uri mediaUri = ExifRotation.resolveForOverwrite(this, pickerItems.get(i));
-                    if (!mediaItems.contains(mediaUri)) mediaItems.add(mediaUri);
+                    Uri mediaUri = ExifRotation.resolveForOverwrite(this, sources.get(i));
+                    if (!mediaItems.contains(mediaUri) && !canWritePhoto(this, mediaUri)) mediaItems.add(mediaUri);
                     int checked = i + 1;
                     runOnUiThread(() -> progress.setProgress(checked));
                 }
                 runOnUiThread(() -> {
                     try {
-                        PendingIntent request = MediaStore.createWriteRequest(getContentResolver(), mediaItems);
                         pendingItems = pickerItems;
+                        if (mediaItems.isEmpty()) {
+                            processSelection(pickerItems, pendingDegrees, true,
+                                    selectedInt(overwriteTimestampGroup) == 1);
+                            return;
+                        }
+                        if (requestMediaManagement && Build.VERSION.SDK_INT >= 31
+                                && !defaultPreferences().getBoolean(PREF_MEDIA_MANAGEMENT_OFFERED, false)
+                                && !MediaStore.canManageMedia(this)) {
+                            progress.setVisibility(View.GONE);
+                            statusText.setText("开启系统的媒体管理授权后，旋转照片无需再次确认。返回后继续旋转。");
+                            Toast.makeText(this, "开启媒体管理授权，之后旋转无需再次确认", Toast.LENGTH_LONG).show();
+                            openMediaManagementSettings(true);
+                            return;
+                        }
+                        PendingIntent request = MediaStore.createWriteRequest(getContentResolver(), mediaItems);
                         progress.setVisibility(View.GONE);
-                        statusText.setText("等待覆盖照片授权…");
+                        statusText.setText(Build.VERSION.SDK_INT >= 31 && MediaStore.canManageMedia(this)
+                                ? "正在准备旋转…" : "等待系统授权修改照片…");
                         startIntentSenderForResult(request.getIntentSender(), REQUEST_OVERWRITE_PERMISSION,
                                 null, 0, 0, 0);
                     } catch (IntentSender.SendIntentException | RuntimeException e) {
@@ -910,6 +1041,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void processSelection(List<Uri> items, int degrees, boolean overwrite,
                                   boolean updateTimestamp) {
+        ArrayList<Uri> sources = new ArrayList<>();
+        for (Uri uri : items) sources.add(updatedPhotoSources.getOrDefault(uri, uri));
         processing = true;
         previewExpanded = false;
         showSelectionPreview();
@@ -922,13 +1055,17 @@ public class MainActivity extends AppCompatActivity {
         progress.setMax(items.size());
         progress.setProgress(0);
         statusText.setText("准备处理 " + items.size() + " 张照片…");
+        statusText.setTextColor(0xFF625F67);
         worker.execute(() -> {
             int success = 0;
             List<String> failures = new ArrayList<>();
+            Map<Uri, Uri> overwrittenSources = new HashMap<>();
             for (int i = 0; i < items.size(); i++) {
                 try {
-                    if (overwrite) ExifRotation.overwrite(this, items.get(i), degrees, updateTimestamp);
-                    else ExifRotation.saveCopy(this, items.get(i), degrees);
+                    if (overwrite) {
+                        Uri updatedSource = ExifRotation.overwrite(this, sources.get(i), degrees, updateTimestamp);
+                        overwrittenSources.put(items.get(i), updatedSource);
+                    } else ExifRotation.saveCopy(this, sources.get(i), degrees);
                     success++;
                 } catch (Exception e) {
                     Log.e("PhotoRotator", "Failed to rotate photo " + (i + 1), e);
@@ -944,14 +1081,21 @@ public class MainActivity extends AppCompatActivity {
             int completed = success;
             List<String> errors = failures;
             runOnUiThread(() -> {
-                if (overwrite && completed > 0) thumbnailCache.evictAll();
+                updatedPhotoSources.putAll(overwrittenSources);
+                for (Uri uri : overwrittenSources.keySet()) thumbnailCache.remove(uri.toString());
                 restoreControls();
-                String result = "完成：成功 " + completed + " 张，失败 " + errors.size() + " 张。";
+                String summary = errors.isEmpty()
+                        ? "旋转成功，已" + (overwrite ? "覆盖 " : "另存 ") + completed + " 张照片"
+                        : "处理完成：成功 " + completed + " 张，失败 " + errors.size() + " 张";
+                String result = summary;
                 if (completed > 0) result += overwrite
                         ? "\n原照片已覆盖，EXIF 信息保留。"
                         : "\n旋转后的照片已另存到 Pictures/PhotoRotator。";
                 if (!errors.isEmpty()) result += "\n" + String.join("\n", errors);
                 statusText.setText(result);
+                statusText.setTextColor(errors.isEmpty() ? 0xFF2E7D32
+                        : completed > 0 ? 0xFF9C6500 : 0xFFBA1A1A);
+                Toast.makeText(this, summary, Toast.LENGTH_SHORT).show();
             });
         });
     }

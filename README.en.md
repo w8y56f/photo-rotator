@@ -11,12 +11,12 @@ A lightweight Android app that lets you pick photos or share them from a gallery
 - **Overwrite timestamp**: restore the original file modification time (default) or update it to the current time. The photo is rescanned and its indexed modification time is verified after saving. This option appears only when overwriting; capture time is retained.
 - **Settings and about**: save defaults for rotation, save mode, and overwrite timestamp behavior; the About page shows the app version and attribution.
 - **EXIF information**: common EXIF data is retained, including GPS, camera make/model, and capture time. Pixels are re-encoded; proprietary maker data and embedded thumbnails may not be retained. If an overwrite fails, the app attempts to restore the original file.
-- **Batch processing**: keep up to 50 photos selected at once, with previews, an expanded view, and individual removal before processing.
+- **Batch processing**: keep up to 50 photos selected at once, with previews, an expanded view, and individual removal before processing. Successful overwrites regenerate previews from the local originals.
 - **Share from a gallery**: shared photos appear selected, ready for review before rotation. Sharing more than 50 photos rejects the entire batch and keeps any prior selection. Photos shared by other apps may lack some EXIF; overwrite is unavailable unless the local original can be identified.
 - **Picking again**: supported systems preselect the current photos in the picker; older systems append new picks without duplicates.
 - **System photo picker**: no folder selection or whole-directory access is required. Cloud photos that are not downloaded locally cannot be rotated.
 
-Processing keeps temporary source and rotated files in the app cache and encodes JPEG/WebP at 95% quality, so allow sufficient free cache space. Overwriting requires approval in an Android confirmation prompt.
+Processing keeps temporary source and rotated files in the app cache and encodes JPEG/WebP at 95% quality, so allow sufficient free cache space. Photos with existing write access rotate directly. On Android 12 and higher, grant media management access in system settings to skip per-operation overwrite confirmations; the app's Settings page provides a shortcut. Without this access, or on Android 11, system confirmation may still be required. Completion shows a short result notification and keeps success or failure details on the page.
 
 ## Build
 
