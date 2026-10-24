@@ -22,8 +22,8 @@ android {
         applicationId = "dev.stone.photorotator"
         minSdk = 30
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.0"
+        versionCode = 4
+        versionName = "1.5.0"
         testInstrumentationRunner = "dev.stone.photorotator.ExifRotationInstrumentation"
         buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
     }

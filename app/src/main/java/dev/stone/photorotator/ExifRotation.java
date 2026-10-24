@@ -29,7 +29,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-/** Rotates the image pixels and carries the source EXIF into the new photo. */
+/** Rotates or compresses photos and verifies the common EXIF fields before saving. */
 final class ExifRotation {
     private ExifRotation() { }
 
@@ -62,12 +62,15 @@ final class ExifRotation {
     };
 
     static Uri saveCopy(Context context, Uri source, int rotationDegrees) throws Exception {
+        return savePreparedCopy(context, prepare(context, source, rotationDegrees, false, 0), "Rotated_");
+    }
+
+    private static Uri savePreparedCopy(Context context, PreparedPhoto prepared, String prefix) throws Exception {
         ContentResolver resolver = context.getContentResolver();
-        PreparedPhoto prepared = prepare(context, source, rotationDegrees, false);
         Uri destination = null;
         try {
             ContentValues values = new ContentValues();
-            values.put(MediaStore.Images.Media.DISPLAY_NAME, "Rotated_" + UUID.randomUUID() + prepared.extension);
+            values.put(MediaStore.Images.Media.DISPLAY_NAME, prefix + UUID.randomUUID() + prepared.extension);
             values.put(MediaStore.Images.Media.MIME_TYPE, prepared.mime);
             values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PhotoRotator");
             values.put(MediaStore.Images.Media.IS_PENDING, 1);
@@ -102,7 +105,11 @@ final class ExifRotation {
 
     static Uri overwrite(Context context, Uri source, int rotationDegrees,
                           boolean updateTimestamp) throws Exception {
-        PreparedPhoto prepared = prepare(context, source, rotationDegrees, true);
+        return overwritePrepared(context, prepare(context, source, rotationDegrees, true, 0), updateTimestamp);
+    }
+
+    private static Uri overwritePrepared(Context context, PreparedPhoto prepared,
+                                         boolean updateTimestamp) throws Exception {
         ContentResolver resolver = context.getContentResolver();
         Uri writeTarget = prepared.mediaUri.buildUpon().authority(MediaStore.AUTHORITY).build();
         try {
@@ -127,6 +134,44 @@ final class ExifRotation {
         }
     }
 
+    static final class CompressionResult {
+        final Uri destination;
+        final long originalBytes;
+        final long compressedBytes;
+        final String skipReason;
+
+        CompressionResult(Uri destination, long originalBytes, long compressedBytes, String skipReason) {
+            this.destination = destination;
+            this.originalBytes = originalBytes;
+            this.compressedBytes = compressedBytes;
+            this.skipReason = skipReason;
+        }
+    }
+
+    private static final class UnsupportedCompressionException extends Exception { }
+
+    static CompressionResult compress(Context context, Uri source, int quality,
+                                      boolean overwrite, boolean updateTimestamp) throws Exception {
+        if (quality < 1 || quality > 100) throw new IllegalArgumentException("无效的压缩质量");
+        PreparedPhoto prepared;
+        try {
+            prepared = prepare(context, source, 0, overwrite, quality);
+        } catch (UnsupportedCompressionException e) {
+            return new CompressionResult(null, 0, 0, "PNG 暂不支持压缩");
+        }
+        try {
+            long before = prepared.sourceFile.length();
+            long after = prepared.rotatedFile.length();
+            // Include the copied EXIF in the comparison. Never replace an original with a larger file.
+            if (after >= before) return new CompressionResult(null, before, before, "压缩后未变小");
+            Uri destination = overwrite ? overwritePrepared(context, prepared, updateTimestamp)
+                    : savePreparedCopy(context, prepared, "Compressed_");
+            return new CompressionResult(destination, before, after, null);
+        } finally {
+            prepared.cleanup();
+        }
+    }
+
     static Uri resolveForOverwrite(Context context, Uri pickerUri) {
         try {
             Uri mediaUri = resolveLocalMediaUri(context, pickerUri);
@@ -139,7 +184,7 @@ final class ExifRotation {
     }
 
     private static PreparedPhoto prepare(Context context, Uri source, int rotationDegrees,
-                                         boolean overwrite) throws Exception {
+                                         boolean overwrite, int compressionQuality) throws Exception {
         ContentResolver resolver = context.getContentResolver();
         Uri mediaUri;
         try {
@@ -157,6 +202,7 @@ final class ExifRotation {
             mime = "image/jpeg";
             extension = ".jpg";
         } else if ("image/png".equalsIgnoreCase(mime)) {
+            if (compressionQuality > 0) throw new UnsupportedCompressionException();
             extension = ".png";
         } else if ("image/webp".equalsIgnoreCase(mime)) {
             extension = ".webp";
@@ -193,17 +239,21 @@ final class ExifRotation {
                 originalValues[i] = sourceExif.getAttribute(COPIED_TAGS[i]);
             }
             rotated = File.createTempFile("photo-rotator-rotated-", extension, context.getCacheDir());
-            rotatePixels(original, rotated, mime, sourceExif, rotationDegrees);
+            if (compressionQuality > 0) compressPixels(original, rotated, mime, compressionQuality);
+            else rotatePixels(original, rotated, mime, sourceExif, rotationDegrees);
+            int outputOrientation = compressionQuality > 0
+                    ? sourceExif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                    : ExifInterface.ORIENTATION_NORMAL;
 
             ExifInterface outputExif = new ExifInterface(rotated);
             for (int i = 0; i < COPIED_TAGS.length; i++) {
                 if (originalValues[i] != null) outputExif.setAttribute(COPIED_TAGS[i], originalValues[i]);
             }
             outputExif.setAttribute(ExifInterface.TAG_ORIENTATION,
-                    Integer.toString(ExifInterface.ORIENTATION_NORMAL));
+                    Integer.toString(outputOrientation));
             outputExif.saveAttributes();
             ExifInterface verified = new ExifInterface(rotated);
-            if (verified.getAttributeInt(ExifInterface.TAG_ORIENTATION, -1) != ExifInterface.ORIENTATION_NORMAL) {
+            if (verified.getAttributeInt(ExifInterface.TAG_ORIENTATION, -1) != outputOrientation) {
                 throw new IllegalStateException("无法更新照片方向信息");
             }
             for (int i = 0; i < COPIED_TAGS.length; i++) {
@@ -212,7 +262,7 @@ final class ExifRotation {
                 }
             }
             return new PreparedPhoto(mediaUri, mime, extension, original, rotated);
-        } catch (Exception e) {
+        } catch (Exception | OutOfMemoryError e) {
             original.delete();
             if (rotated != null) rotated.delete();
             throw e;
@@ -312,6 +362,36 @@ final class ExifRotation {
             } catch (NumberFormatException ignored) { }
         }
         return false;
+    }
+
+    private static void compressPixels(File source, File destination, String mime, int quality) throws Exception {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(source.getAbsolutePath(), bounds);
+        Runtime runtime = Runtime.getRuntime();
+        long available = runtime.maxMemory() - runtime.totalMemory() + runtime.freeMemory();
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw new IllegalArgumentException("无法解码所选照片");
+        if ((long) bounds.outWidth * bounds.outHeight * 4 > available - 32L * 1024 * 1024) {
+            throw new IllegalStateException("照片分辨率过高，当前内存不足以保持原尺寸压缩");
+        }
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inScaled = false;
+        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        Bitmap bitmap = BitmapFactory.decodeFile(source.getAbsolutePath(), options);
+        if (bitmap == null) throw new IllegalArgumentException("无法解码所选照片");
+        try (OutputStream output = new FileOutputStream(destination)) {
+            Bitmap.CompressFormat format = "image/webp".equals(mime)
+                    ? Bitmap.CompressFormat.WEBP_LOSSY : Bitmap.CompressFormat.JPEG;
+            if (!bitmap.compress(format, quality, output)) throw new IllegalStateException("无法编码压缩后的照片");
+        } finally {
+            bitmap.recycle();
+        }
+        BitmapFactory.Options result = new BitmapFactory.Options();
+        result.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(destination.getAbsolutePath(), result);
+        if (result.outWidth != bounds.outWidth || result.outHeight != bounds.outHeight) {
+            throw new IllegalStateException("压缩后的照片尺寸不一致");
+        }
     }
 
     private static void rotatePixels(File source, File destination, String mime,

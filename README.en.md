@@ -2,26 +2,28 @@
 
 [简体中文](README.md)
 
-A lightweight Android app that lets you pick photos or share them from a gallery, rotate them by 90° or 180°, and either overwrite the originals or save copies to `Pictures/PhotoRotator`.
+A lightweight Android app that lets you pick photos or share them from a gallery, rotate them by 90° or 180° or compress them at their original resolution, and either overwrite the originals or save copies to `Pictures/PhotoRotator`.
 
 ## Features
 
+- **Operation modes**: switch between Rotation and Compression at the top. Only the active parameters are shown; selected photos, per-mode parameters, and shared save options survive mode changes. Rotation remains the initial mode. Pick and process actions stay at the bottom while options, previews, and results scroll.
+- **Compression**: JPEG and WebP support light (quality 92), balanced (85, default), and strong (70) lossy compression without resizing or rotating pixels. PNG is skipped. Size is compared after common EXIF is copied; results that are not smaller are skipped without creating a copy, changing the original, or updating its timestamp. Results show successes, skips, failures, and savings. Size totals include successful and non-smaller results, excluding unsupported formats and failures.
 - **Rotation direction**: 90° counterclockwise (default), 90° clockwise, or 180°.
 - **Save mode**: overwrite the original (default) after Android grants write access, or save a new image to `Pictures/PhotoRotator`.
 - **Overwrite timestamp**: restore the original file modification time (default) or update it to the current time. The photo is rescanned and its indexed modification time is verified after saving. This option appears only when overwriting; capture time is retained.
-- **Settings and about**: save defaults for rotation, save mode, and overwrite timestamp behavior. The main screen and About page show the version and seven-character Git commit ID captured at build time. Debug builds append `-dirty` when uncommitted changes are present; everyday debugging does not require committing. The About page also shows attribution.
+- **Settings and about**: save defaults for rotation, compression strength, save mode, and overwrite timestamp behavior. The main screen and About page show the version and seven-character Git commit ID captured at build time. Debug builds append `-dirty` when uncommitted changes are present; everyday debugging does not require committing. The About page also shows attribution.
 - **EXIF information**: common EXIF data is retained, including GPS, camera make/model, and capture time. Pixels are re-encoded; proprietary maker data and embedded thumbnails may not be retained. If an overwrite fails, the app attempts to restore the original file.
 - **Batch processing**: keep up to 50 photos selected at once, with previews, an expanded view, and individual removal before processing. Successful overwrites regenerate previews from the local originals.
-- **Share from a gallery**: shared photos appear selected, ready for review before rotation. Sharing more than 50 photos rejects the entire batch and keeps any prior selection. Photos shared by other apps may lack some EXIF; overwrite is unavailable unless the local original can be identified.
+- **Share from a gallery**: shared photos appear selected, ready for review before choosing and running an operation. Sharing more than 50 photos rejects the entire batch and keeps any prior selection. Photos shared by other apps may lack some EXIF; overwrite is unavailable unless the local original can be identified.
 - **Picking again**: supported systems preselect the current photos in the picker; older systems append new picks without duplicates.
-- **System photo picker**: no folder selection or whole-directory access is required. Cloud photos that are not downloaded locally cannot be rotated.
+- **System photo picker**: no folder selection or whole-directory access is required. Cloud photos that are not downloaded locally cannot be processed.
 
-Processing keeps temporary source and rotated files in the app cache and encodes JPEG/WebP at 95% quality, so allow sufficient free cache space. Photos with existing write access rotate directly. On Android 12 and higher, grant media management access in system settings to skip per-operation overwrite confirmations; the app's Settings page provides a shortcut. Without this access, or on Android 11, system confirmation may still be required. Completion shows a short result notification and keeps success or failure details on the page.
+Processing keeps temporary source and processed files in the app cache. Rotation encodes JPEG/WebP at quality 95; compression uses the selected preset, so allow sufficient free cache space. Photos with existing write access process directly. On Android 12 and higher, grant media management access in system settings to skip per-operation overwrite confirmations; the app's Settings page provides a shortcut. Without this access, or on Android 11, system confirmation may still be required. Completion shows a short result notification and keeps success or failure details on the page.
 
 ## Build
 
 - Application ID: `dev.stone.photorotator`
-- Version: `1.0.0` (versionCode `3`)
+- Version: `1.5.0` (versionCode `4`)
 - Minimum Android version: Android 11 (API 30)
 - Compile SDK: API 35
 - Java: 11
@@ -38,7 +40,7 @@ The APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 The system photo picker may return a virtual path or a transformed display name. For local Android photo-picker URIs, the app reads the original MediaStore image ID from the URI and confirms that the local image exists before accessing it. Android document URIs are mapped to equivalent MediaStore URIs where possible. Other shared URIs are matched to local photos by name and verified by original path or file contents. If a gallery strips camera EXIF and changes the shared file size, identical JPEG image data can still identify the original. Overwrite is allowed only for a unique match. If no local original can be identified, saving a copy uses the bytes and EXIF supplied by the sharing app.
 
-EXIF handling uses AndroidX `ExifInterface`. Before and after writing, the app compares the common EXIF fields it copies and sets the image orientation to normal. Failed new copies are removed; failed overwrites attempt to restore the original file.
+EXIF handling uses AndroidX `ExifInterface`. Before and after writing, the app compares the common EXIF fields it copies. Rotation sets the image orientation to normal; compression preserves the original orientation tag and pixel dimensions. Failed new copies are removed; failed overwrites attempt to restore the original file.
 
 ## License
 

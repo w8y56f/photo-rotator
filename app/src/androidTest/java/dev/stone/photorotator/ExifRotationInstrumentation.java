@@ -32,6 +32,10 @@ public class ExifRotationInstrumentation extends Instrumentation {
     @Override public void onCreate(Bundle args) { super.onCreate(args); arguments = args; start(); }
 
     @Override public void onStart() {
+        if ("true".equals(arguments.getString("compressionOnly"))) {
+            testCompression();
+            return;
+        }
         if ("true".equals(arguments.getString("overwriteTimestampsOnly"))) {
             testOverwriteTimestamps();
             return;
@@ -107,6 +111,201 @@ public class ExifRotationInstrumentation extends Instrumentation {
             }
             finish(code, result);
         }
+    }
+
+    private void testCompression() {
+        Bundle result = new Bundle();
+        ContentResolver resolver = getTargetContext().getContentResolver();
+        java.util.ArrayList<Uri> fixtures = new java.util.ArrayList<>();
+        int code = Activity.RESULT_CANCELED;
+        try {
+            for (String mime : new String[]{"image/jpeg", "image/webp"}) {
+                Uri fixture = createCompressionFixture(resolver, mime, fixtures);
+                byte[] before = read(resolver, fixture);
+                ExifRotation.CompressionResult copy = ExifRotation.compress(getTargetContext(), fixture, 85, false, false);
+                require(copy.destination != null && copy.skipReason == null, "Compression was unexpectedly skipped: " + mime);
+                fixtures.add(copy.destination);
+                byte[] after = read(resolver, copy.destination);
+                require(after.length < before.length && copy.originalBytes == before.length
+                        && copy.compressedBytes == after.length, "Incorrect compression sizes");
+                verifyCompressedImage(resolver, copy.destination);
+                require(Arrays.equals(before, read(resolver, fixture)), "Save-copy modified the original");
+                result.putLong(mime + "_before", before.length);
+                result.putLong(mime + "_after", after.length);
+
+                long historicalTime = 1600000000000L;
+                try (ParcelFileDescriptor fd = resolver.openFileDescriptor(fixture, "rw")) {
+                    require(fd != null && new File("/proc/self/fd/" + fd.getFd()).setLastModified(historicalTime),
+                            "Cannot set fixture timestamp");
+                }
+                ExifRotation.CompressionResult overwritten = ExifRotation.compress(getTargetContext(), fixture, 85, true, false);
+                require(fixture.equals(overwritten.destination), "Compression overwrite returned wrong URI");
+                verifyCompressedImage(resolver, fixture);
+                try (ParcelFileDescriptor fd = resolver.openFileDescriptor(fixture, "r")) {
+                    require(fd != null && Os.fstat(fd.getFileDescriptor()).st_mtime == historicalTime / 1000,
+                            "Compression changed preserved timestamp");
+                }
+                require(mediaDates(resolver, fixture)[0] == historicalTime / 1000, "Gallery timestamp not preserved");
+                result.putBoolean(mime + "_dimensions_orientation_exif_copy_overwrite", true);
+
+                Uri fresh = createCompressionFixture(resolver, mime, fixtures);
+                long start = System.currentTimeMillis() / 1000;
+                ExifRotation.CompressionResult updated = ExifRotation.compress(getTargetContext(), fresh, 70, true, true);
+                require(fresh.equals(updated.destination) && mediaDates(resolver, fresh)[0] >= start,
+                        "Compression did not update timestamp");
+                verifyCompressedImage(resolver, fresh);
+            }
+            Uri tiny = createSolidFixture(resolver, "image/jpeg", Bitmap.CompressFormat.JPEG, fixtures);
+            byte[] tinyBefore = read(resolver, tiny);
+            scanFixture(resolver, tiny);
+            Long[] datesBefore = mediaDates(resolver, tiny);
+            ExifRotation.CompressionResult skipped = ExifRotation.compress(getTargetContext(), tiny, 92, true, true);
+            require(skipped.destination == null && "压缩后未变小".equals(skipped.skipReason), "Larger result not skipped");
+            require(Arrays.equals(tinyBefore, read(resolver, tiny)), "Skipped compression changed original bytes");
+            require(Arrays.equals(datesBefore, mediaDates(resolver, tiny)),
+                    "Skipped compression changed dates: " + Arrays.toString(datesBefore)
+                            + " -> " + Arrays.toString(mediaDates(resolver, tiny)));
+            ExifRotation.CompressionResult skippedCopy = ExifRotation.compress(getTargetContext(), tiny, 92, false, false);
+            require(skippedCopy.destination == null, "Skipped save-copy created a destination");
+            Uri png = createSolidFixture(resolver, "image/png", Bitmap.CompressFormat.PNG, fixtures);
+            byte[] pngBefore = read(resolver, png);
+            require(ExifRotation.compress(getTargetContext(), png, 85, true, true).skipReason != null,
+                    "PNG was not skipped");
+            require(Arrays.equals(pngBefore, read(resolver, png)), "Skipped PNG was changed");
+            result.putBoolean("skip_preserves_bytes_and_dates", true);
+            result.putBoolean("png_skipped_without_changes", true);
+            testOperationControls(result);
+            code = Activity.RESULT_OK;
+        } catch (Throwable failure) {
+            result.putString("failure", failure.toString());
+            android.util.Log.e("CompressionTest", "Regression failed", failure);
+        } finally {
+            for (Uri fixture : fixtures) {
+                try { require(resolver.delete(fixture, null, null) == 1, "Cannot remove compression fixture"); }
+                catch (Throwable failure) { result.putString("cleanup_failure", failure.toString()); code = Activity.RESULT_CANCELED; }
+            }
+            File[] temporary = getTargetContext().getCacheDir().listFiles((dir, name) -> name.startsWith("photo-rotator-"));
+            result.putBoolean("temporary_files_cleaned", temporary != null && temporary.length == 0);
+            finish(code, result);
+        }
+    }
+
+    private void scanFixture(ContentResolver resolver, Uri uri) throws Exception {
+        String path;
+        try (Cursor cursor = resolver.query(uri, new String[]{MediaStore.MediaColumns.DATA}, null, null, null)) {
+            require(cursor != null && cursor.moveToFirst(), "Missing fixture path");
+            path = cursor.getString(0);
+        }
+        CountDownLatch scanned = new CountDownLatch(1);
+        MediaScannerConnection.scanFile(getTargetContext(), new String[]{path}, null,
+                (scannedPath, scannedUri) -> scanned.countDown());
+        require(scanned.await(30, TimeUnit.SECONDS), "Fixture scan timed out");
+    }
+
+    private Uri createCompressionFixture(ContentResolver resolver, String mime,
+                                         java.util.List<Uri> fixtures) throws Exception {
+        Uri uri = insertFixture(resolver, mime, fixtures);
+        Bitmap bitmap = Bitmap.createBitmap(640, 360, Bitmap.Config.ARGB_8888);
+        java.util.Random random = new java.util.Random(1234);
+        int[] pixels = new int[640 * 360];
+        for (int i = 0; i < pixels.length; i++) pixels[i] = 0xff000000 | random.nextInt(0x1000000);
+        bitmap.setPixels(pixels, 0, 640, 0, 0, 640, 360);
+        try (OutputStream output = resolver.openOutputStream(uri, "wt")) {
+            require(output != null && bitmap.compress("image/jpeg".equals(mime) ? Bitmap.CompressFormat.JPEG
+                    : Bitmap.CompressFormat.WEBP_LOSSLESS, 100, output), "Cannot encode fixture");
+        } finally { bitmap.recycle(); }
+        try (ParcelFileDescriptor fd = resolver.openFileDescriptor(uri, "rw")) {
+            require(fd != null, "Cannot write fixture EXIF");
+            ExifInterface exif = new ExifInterface(fd.getFileDescriptor());
+            exif.setAttribute(ExifInterface.TAG_ORIENTATION, "6");
+            exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, "2020:09:13 12:26:40");
+            exif.setAttribute(ExifInterface.TAG_MAKE, "CompressionTest");
+            exif.setAttribute(ExifInterface.TAG_MODEL, "FixtureCamera");
+            exif.setLatLong(25.03, 121.56);
+            exif.saveAttributes();
+        }
+        return uri;
+    }
+
+    private Uri insertFixture(ContentResolver resolver, String mime, java.util.List<Uri> fixtures) {
+        ContentValues values = new ContentValues();
+        String extension = "image/jpeg".equals(mime) ? ".jpg" : "image/webp".equals(mime) ? ".webp" : ".png";
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, "CompressionTest_" + UUID.randomUUID() + extension);
+        values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/PhotoRotator");
+        Uri uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+        require(uri != null, "Cannot create compression fixture");
+        fixtures.add(uri);
+        return uri;
+    }
+
+    private Uri createSolidFixture(ContentResolver resolver, String mime, Bitmap.CompressFormat format,
+                                   java.util.List<Uri> fixtures) throws Exception {
+        Uri uri = insertFixture(resolver, mime, fixtures);
+        Bitmap bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888);
+        bitmap.eraseColor(0xff808080);
+        try (OutputStream output = resolver.openOutputStream(uri, "wt")) {
+            require(output != null && bitmap.compress(format, 1, output), "Cannot encode solid fixture");
+        } finally { bitmap.recycle(); }
+        return uri;
+    }
+
+    private void verifyCompressedImage(ContentResolver resolver, Uri uri) throws Exception {
+        byte[] bytes = read(resolver, uri);
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        require(bounds.outWidth == 640 && bounds.outHeight == 360, "Compression rotated or resized pixels");
+        ExifInterface exif = new ExifInterface(new ByteArrayInputStream(bytes));
+        require(exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, -1) == 6, "Compression changed EXIF orientation");
+        require("2020:09:13 12:26:40".equals(exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)), "Lost capture time");
+        require("FixtureCamera".equals(exif.getAttribute(ExifInterface.TAG_MODEL)), "Lost camera model");
+        double[] gps = exif.getLatLong();
+        require(gps != null && Math.abs(gps[0] - 25.03) < .00001 && Math.abs(gps[1] - 121.56) < .00001, "Lost GPS");
+    }
+
+    private Object field(Object object, String name) throws Exception {
+        java.lang.reflect.Field field = object.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(object);
+    }
+
+    private void testOperationControls(Bundle result) throws Exception {
+        android.content.Intent intent = new android.content.Intent(getTargetContext(), MainActivity.class);
+        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+        MainActivity activity = (MainActivity) startActivitySync(intent);
+        waitForIdleSync();
+        final Throwable[] failure = new Throwable[1];
+        runOnMainSync(() -> {
+            try {
+                android.widget.RadioGroup mode = (android.widget.RadioGroup) field(activity, "operationGroup");
+                android.widget.RadioGroup direction = (android.widget.RadioGroup) field(activity, "directionGroup");
+                android.widget.RadioGroup quality = (android.widget.RadioGroup) field(activity, "qualityGroup");
+                android.widget.RadioGroup save = (android.widget.RadioGroup) field(activity, "saveModeGroup");
+                android.widget.RadioGroup timestamp = (android.widget.RadioGroup) field(activity, "overwriteTimestampGroup");
+                android.widget.Button action = (android.widget.Button) field(activity, "processButton");
+                require(((android.view.View) field(activity, "rotationSection")).getVisibility() == android.view.View.VISIBLE,
+                        "Rotation should be the initial mode");
+                direction.check(direction.getChildAt(2).getId());
+                save.check(save.getChildAt(1).getId());
+                timestamp.check(timestamp.getChildAt(1).getId());
+                mode.check(mode.getChildAt(1).getId());
+                require(((android.view.View) field(activity, "rotationSection")).getVisibility() == android.view.View.GONE
+                        && ((android.view.View) field(activity, "compressionSection")).getVisibility() == android.view.View.VISIBLE,
+                        "Compression did not replace rotation settings");
+                require("开始压缩".contentEquals(action.getText()), "Compression action label is wrong");
+                quality.check(quality.getChildAt(2).getId());
+                mode.check(mode.getChildAt(0).getId());
+                require(direction.getCheckedRadioButtonId() == direction.getChildAt(2).getId()
+                        && save.getCheckedRadioButtonId() == save.getChildAt(1).getId()
+                        && timestamp.getCheckedRadioButtonId() == timestamp.getChildAt(1).getId(),
+                        "Switching modes lost shared or rotation options");
+                mode.check(mode.getChildAt(1).getId());
+                require(quality.getCheckedRadioButtonId() == quality.getChildAt(2).getId(), "Switching modes lost compression options");
+                result.putBoolean("mode_switch_and_shared_settings_passed", true);
+            } catch (Throwable e) { failure[0] = e; }
+        });
+        if (failure[0] != null) throw new AssertionError("UI controls failed", failure[0]);
     }
 
     private void testOverwriteTimestamps() {

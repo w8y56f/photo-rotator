@@ -75,6 +75,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String STATE_PREVIEW_SOURCES = "preview_sources";
     private static final String PREFS_NAME = "photo_rotator_preferences";
     private static final String PREF_DEFAULT_ROTATION = "default_rotation";
+    private static final String PREF_DEFAULT_QUALITY = "default_compression_quality";
     private static final String PREF_DEFAULT_SAVE_MODE = "default_save_mode";
     private static final String PREF_DEFAULT_TIMESTAMP = "default_timestamp";
     private static final String PREF_MEDIA_MANAGEMENT_OFFERED = "media_management_offered";
@@ -85,7 +86,11 @@ public class MainActivity extends AppCompatActivity {
     private static final String EXTRA_PICKER_PRE_SELECTION_URIS =
             "android.provider.extra.PICKER_PRE_SELECTION_URIS";
     private Button chooseButton;
-    private Button rotateButton;
+    private Button processButton;
+    private RadioGroup operationGroup;
+    private RadioGroup qualityGroup;
+    private View rotationSection;
+    private View compressionSection;
     private RadioGroup directionGroup;
     private RadioGroup saveModeGroup;
     private RadioGroup overwriteTimestampGroup;
@@ -116,8 +121,11 @@ public class MainActivity extends AppCompatActivity {
     private boolean processing;
     private ArrayList<Uri> pendingItems;
     private int pendingDegrees;
+    private boolean pendingCompression;
+    private int pendingQuality;
+    private boolean pendingUpdateTimestamp;
     private boolean pendingOverwrite;
-    private boolean resumeRotationAfterMediaManagement;
+    private boolean resumeProcessingAfterMediaManagement;
 
     @Override protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -152,6 +160,18 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
             selectedUrisFromPhotoPicker = savedInstanceState.getBoolean(STATE_PICKER_SELECTION, true);
+            operationGroup.check(operationGroup.getChildAt(savedInstanceState.getBoolean("compress_mode", false) ? 1 : 0).getId());
+            checkInt(directionGroup, savedInstanceState.getInt("rotation", selectedInt(directionGroup)));
+            checkInt(qualityGroup, savedInstanceState.getInt("quality", selectedInt(qualityGroup)));
+            checkInt(saveModeGroup, savedInstanceState.getInt("save_mode", selectedInt(saveModeGroup)));
+            checkInt(overwriteTimestampGroup, savedInstanceState.getInt("timestamp", selectedInt(overwriteTimestampGroup)));
+            pendingCompression = savedInstanceState.getBoolean("pending_compression");
+            pendingQuality = savedInstanceState.getInt("pending_quality", 85);
+            pendingDegrees = savedInstanceState.getInt("pending_degrees", -90);
+            pendingOverwrite = savedInstanceState.getBoolean("pending_overwrite");
+            pendingUpdateTimestamp = savedInstanceState.getBoolean("pending_timestamp");
+            pendingItems = savedInstanceState.getParcelableArrayList("pending_items");
+            resumeProcessingAfterMediaManagement = savedInstanceState.getBoolean("resume_media_management");
             updateSelection();
         } else {
             receiveSharedImages(getIntent());
@@ -170,6 +190,18 @@ public class MainActivity extends AppCompatActivity {
         for (Uri uri : selected) previewSources.add(updatedPhotoSources.get(uri));
         outState.putParcelableArrayList(STATE_PREVIEW_SOURCES, previewSources);
         outState.putBoolean(STATE_PICKER_SELECTION, selectedUrisFromPhotoPicker);
+        outState.putBoolean("compress_mode", isCompressionMode());
+        outState.putInt("rotation", selectedInt(directionGroup));
+        outState.putInt("quality", selectedInt(qualityGroup));
+        outState.putInt("save_mode", selectedInt(saveModeGroup));
+        outState.putInt("timestamp", selectedInt(overwriteTimestampGroup));
+        outState.putBoolean("pending_compression", pendingCompression);
+        outState.putInt("pending_quality", pendingQuality);
+        outState.putInt("pending_degrees", pendingDegrees);
+        outState.putBoolean("pending_overwrite", pendingOverwrite);
+        outState.putBoolean("pending_timestamp", pendingUpdateTimestamp);
+        outState.putParcelableArrayList("pending_items", pendingItems);
+        outState.putBoolean("resume_media_management", resumeProcessingAfterMediaManagement);
         super.onSaveInstanceState(outState);
     }
 
@@ -246,7 +278,7 @@ public class MainActivity extends AppCompatActivity {
         selectedUrisFromPhotoPicker = false;
         previewExpanded = false;
         updateSelection();
-        statusText.setText("已载入 " + selected.size() + " 张分享照片。请确认旋转设置与保存方式；其他应用分享的照片可能不包含完整 EXIF，且可能无法覆盖原图。");
+        statusText.setText("已载入 " + selected.size() + " 张分享照片。请确认处理功能与保存设置；其他应用分享的照片可能不包含完整 EXIF，且可能无法覆盖原图。");
     }
 
     private void buildScreen() {
@@ -288,7 +320,44 @@ public class MainActivity extends AppCompatActivity {
         settingsButton.setOnClickListener(v -> showSettingsScreen());
         titleRow.addView(settingsButton, wrapWrap());
 
-        addSectionTitle(root, "旋转设置", dp(22));
+        operationGroup = new RadioGroup(this);
+        operationGroup.setOrientation(RadioGroup.HORIZONTAL);
+        operationGroup.setContentDescription("处理功能");
+        addRadio(operationGroup, "旋转", 0, true);
+        addRadio(operationGroup, "压缩", 1, false);
+        for (int i = 0; i < operationGroup.getChildCount(); i++) {
+            RadioButton tab = (RadioButton) operationGroup.getChildAt(i);
+            RadioGroup.LayoutParams tabParams = new RadioGroup.LayoutParams(0, dp(48), 1f);
+            if (i == 0) tabParams.rightMargin = dp(6);
+            else tabParams.leftMargin = dp(6);
+            tab.setLayoutParams(tabParams);
+            tab.setButtonDrawable(null);
+            tab.setGravity(Gravity.CENTER);
+            tab.setPadding(dp(8), 0, dp(8), 0);
+            tab.setTextColor(new ColorStateList(
+                    new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                    new int[]{0xFFFFFFFF, brandColor}));
+            android.graphics.drawable.StateListDrawable backgrounds = new android.graphics.drawable.StateListDrawable();
+            GradientDrawable active = new GradientDrawable();
+            active.setColor(brandColor);
+            active.setCornerRadius(dp(14));
+            GradientDrawable inactive = new GradientDrawable();
+            inactive.setColor(0xFFE0E9FA);
+            inactive.setCornerRadius(dp(14));
+            backgrounds.addState(new int[]{android.R.attr.state_checked}, active);
+            backgrounds.addState(new int[]{}, inactive);
+            tab.setBackground(new android.graphics.drawable.RippleDrawable(
+                    ColorStateList.valueOf(0x302454A8), backgrounds, null));
+        }
+        LinearLayout.LayoutParams operationParams = matchWrap();
+        operationParams.topMargin = dp(16);
+        root.addView(operationGroup, operationParams);
+
+        LinearLayout rotationOptions = new LinearLayout(this);
+        rotationOptions.setOrientation(LinearLayout.VERTICAL);
+        rotationSection = rotationOptions;
+        root.addView(rotationOptions, matchWrap());
+        addSectionTitle(rotationOptions, "旋转方向", dp(12));
         LinearLayout directionCard = optionCard();
         directionGroup = new RadioGroup(this);
         directionGroup.setOrientation(RadioGroup.VERTICAL);
@@ -297,14 +366,28 @@ public class MainActivity extends AppCompatActivity {
         addRadio(directionGroup, "顺时针90度", 90, defaultRotation == 90);
         addRadio(directionGroup, "180度", 180, defaultRotation == 180);
         directionCard.addView(directionGroup, matchWrap());
-        root.addView(directionCard, matchWrap());
+        rotationOptions.addView(directionCard, matchWrap());
 
-        addSectionTitle(root, "编辑后保存方式", dp(18));
+        LinearLayout compressionOptions = new LinearLayout(this);
+        compressionOptions.setOrientation(LinearLayout.VERTICAL);
+        compressionSection = compressionOptions;
+        root.addView(compressionOptions, matchWrap());
+        addSectionTitle(compressionOptions, "压缩强度", dp(12));
+        qualityGroup = new RadioGroup(this);
+        qualityGroup.setOrientation(RadioGroup.VERTICAL);
+        int defaultQuality = defaultPreferences().getInt(PREF_DEFAULT_QUALITY, 85);
+        addCompressionChoices(qualityGroup, defaultQuality);
+        LinearLayout qualityCard = optionCard();
+        qualityCard.addView(qualityGroup, matchWrap());
+        compressionOptions.addView(qualityCard, matchWrap());
+        addHint(compressionOptions, "保持分辨率，不旋转照片；画质可能变化。\n支持 JPEG、WebP；PNG 会跳过。压缩后未变小也会跳过。");
+
+        addSectionTitle(root, "保存设置", dp(18));
         LinearLayout modeCard = optionCard();
         saveModeGroup = new RadioGroup(this);
         saveModeGroup.setOrientation(RadioGroup.HORIZONTAL);
         int defaultSaveMode = defaultPreferences().getInt(PREF_DEFAULT_SAVE_MODE, 1);
-        addRadio(saveModeGroup, "覆盖", 1, defaultSaveMode == 1);
+        addRadio(saveModeGroup, "覆盖原图", 1, defaultSaveMode == 1);
         addRadio(saveModeGroup, "另存新图", 0, defaultSaveMode == 0);
         modeCard.addView(saveModeGroup, matchWrap());
         root.addView(modeCard, matchWrap());
@@ -313,9 +396,11 @@ public class MainActivity extends AppCompatActivity {
         overwriteTimestampGroup = new RadioGroup(this);
         overwriteTimestampGroup.setOrientation(RadioGroup.VERTICAL);
         int defaultTimestamp = defaultPreferences().getInt(PREF_DEFAULT_TIMESTAMP, 0);
-        addRadio(overwriteTimestampGroup, "不改时间戳", 0, defaultTimestamp == 0);
-        addRadio(overwriteTimestampGroup, "更新时间戳", 1, defaultTimestamp == 1);
+        addHint(timestampCard, "覆盖后的修改时间");
+        addRadio(overwriteTimestampGroup, "保持原时间", 0, defaultTimestamp == 0);
+        addRadio(overwriteTimestampGroup, "更新为当前时间", 1, defaultTimestamp == 1);
         timestampCard.addView(overwriteTimestampGroup, matchWrap());
+        addHint(timestampCard, "不修改 EXIF 拍摄时间");
         timestampCard.setVisibility(View.GONE);
         LinearLayout.LayoutParams timestampParams = matchWrap();
         timestampParams.topMargin = dp(8);
@@ -327,8 +412,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout actionRow = new LinearLayout(this);
         actionRow.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams actionParams = matchWrap();
-        actionParams.topMargin = dp(20);
-        root.addView(actionRow, actionParams);
+        actionParams.topMargin = 0;
 
         chooseButton = new Button(this);
         chooseButton.setText("选择照片");
@@ -339,24 +423,23 @@ public class MainActivity extends AppCompatActivity {
         actionRow.addView(chooseButton, chooseParams);
         chooseButton.setOnClickListener(v -> openNativePhotoPicker());
 
-        rotateButton = new Button(this);
-        rotateButton.setText("旋转");
-        styleActionButton(rotateButton, true);
-        rotateButton.setEnabled(false);
+        processButton = new Button(this);
+        processButton.setText("开始旋转");
+        styleActionButton(processButton, true);
+        processButton.setEnabled(false);
         LinearLayout.LayoutParams rotateParams = new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         rotateParams.leftMargin = dp(6);
-        actionRow.addView(rotateButton, rotateParams);
-        rotateButton.setOnClickListener(v -> beginRotation());
+        actionRow.addView(processButton, rotateParams);
+        processButton.setOnClickListener(v -> beginProcessing());
 
         TextView metadataHint = new TextView(this);
-        metadataHint.setText("不会修改 EXIF 信息（如位置、设备等）");
+        metadataHint.setText("尽量保留拍摄时间、位置等常用 EXIF 信息");
         metadataHint.setTextColor(COLOR_MUTED);
         metadataHint.setTextSize(12);
         metadataHint.setGravity(Gravity.END);
         LinearLayout.LayoutParams metadataParams = matchWrap();
         metadataParams.topMargin = dp(2);
-        root.addView(metadataHint, metadataParams);
 
         selectionRow = new LinearLayout(this);
         selectionRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -407,6 +490,14 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams previewParams = matchWrap();
         previewParams.topMargin = dp(10);
         root.addView(previewGrid, previewParams);
+        LinearLayout actionFooter = new LinearLayout(this);
+        actionFooter.setOrientation(LinearLayout.VERTICAL);
+        actionFooter.setPadding(dp(20), dp(8), dp(20), dp(8));
+        actionFooter.setBackgroundColor(COLOR_SURFACE);
+        actionFooter.addView(actionRow, actionParams);
+        actionFooter.addView(metadataHint, metadataParams);
+        operationGroup.setOnCheckedChangeListener((group, checkedId) -> updateOperation());
+        updateOperation();
 
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setVisibility(View.GONE);
@@ -421,8 +512,52 @@ public class MainActivity extends AppCompatActivity {
         statusParams.topMargin = dp(10);
         root.addView(statusText, statusParams);
 
-        mainScreen = createScreen(titleRow, root);
+        mainScreen = createScreen(titleRow, root, actionFooter);
         setContentView(mainScreen);
+    }
+
+    private boolean isCompressionMode() {
+        return selectedInt(operationGroup) == 1;
+    }
+
+    private void updateOperation() {
+        boolean compress = isCompressionMode();
+        rotationSection.setVisibility(compress ? View.GONE : View.VISIBLE);
+        compressionSection.setVisibility(compress ? View.VISIBLE : View.GONE);
+        processButton.setText(compress ? "开始压缩" : "开始旋转");
+    }
+
+    private void addCompressionChoices(RadioGroup group, int quality) {
+        addRadio(group, "轻度 · 优先画质", 92, quality == 92);
+        addRadio(group, "均衡 · 推荐", 85, quality == 85);
+        addRadio(group, "强力 · 优先体积", 70, quality == 70);
+    }
+
+    private void checkInt(RadioGroup group, int value) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (Integer.valueOf(value).equals(child.getTag())) group.check(child.getId());
+        }
+    }
+
+    private void addHint(LinearLayout parent, String text) {
+        TextView hint = new TextView(this);
+        hint.setText(text);
+        hint.setTextSize(12);
+        hint.setTextColor(COLOR_MUTED);
+        LinearLayout.LayoutParams params = matchWrap();
+        params.topMargin = dp(6);
+        parent.addView(hint, params);
+    }
+
+    private void setEditingEnabled(boolean enabled) {
+        processButton.setEnabled(enabled && !selected.isEmpty());
+        chooseButton.setEnabled(enabled);
+        setGroupEnabled(operationGroup, enabled);
+        setGroupEnabled(qualityGroup, enabled);
+        setGroupEnabled(directionGroup, enabled);
+        setGroupEnabled(saveModeGroup, enabled);
+        setGroupEnabled(overwriteTimestampGroup, enabled);
     }
 
     private void stylePageHeader(LinearLayout header) {
@@ -434,6 +569,10 @@ public class MainActivity extends AppCompatActivity {
     // Own both system-bar insets so Android 15's edge-to-edge layout keeps the
     // blue header and footer behind system icons without covering any controls.
     private View createScreen(LinearLayout header, LinearLayout content) {
+        return createScreen(header, content, null);
+    }
+
+    private View createScreen(LinearLayout header, LinearLayout content, @Nullable View footer) {
         LinearLayout screen = new LinearLayout(this);
         screen.setOrientation(LinearLayout.VERTICAL);
         screen.setBackgroundColor(brandColor);
@@ -446,6 +585,7 @@ public class MainActivity extends AppCompatActivity {
         scroll.addView(content);
         screen.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        if (footer != null) screen.addView(footer, matchWrap());
         ViewCompat.setOnApplyWindowInsetsListener(screen, (view, windowInsets) -> {
             Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars()
                     | WindowInsetsCompat.Type.displayCutout());
@@ -526,7 +666,7 @@ public class MainActivity extends AppCompatActivity {
 
         addSectionTitle(root, "默认设置", dp(22));
         TextView hint = new TextView(this);
-        hint.setText("这些选项会作为主界面的默认值；每次旋转前仍可单独调整。");
+        hint.setText("这些选项会作为主界面的默认值；每次处理前仍可单独调整。旋转和压缩共用保存设置。");
         hint.setTextColor(COLOR_MUTED);
         hint.setTextSize(14);
         LinearLayout.LayoutParams hintParams = matchWrap();
@@ -544,21 +684,28 @@ public class MainActivity extends AppCompatActivity {
         rotationDefaults.setOnCheckedChangeListener((group, checkedId) ->
                 preferences.edit().putInt(PREF_DEFAULT_ROTATION, selectedInt(rotationDefaults)).apply());
 
+        RadioGroup qualityDefaults = new RadioGroup(this);
+        qualityDefaults.setOrientation(RadioGroup.VERTICAL);
+        addCompressionChoices(qualityDefaults, preferences.getInt(PREF_DEFAULT_QUALITY, 85));
+        addSettingsGroup(root, "压缩强度", qualityDefaults);
+        qualityDefaults.setOnCheckedChangeListener((group, checkedId) ->
+                preferences.edit().putInt(PREF_DEFAULT_QUALITY, selectedInt(qualityDefaults)).apply());
+
         RadioGroup saveModeDefaults = new RadioGroup(this);
         saveModeDefaults.setOrientation(RadioGroup.VERTICAL);
         int saveMode = preferences.getInt(PREF_DEFAULT_SAVE_MODE, 1);
         addRadio(saveModeDefaults, "覆盖", 1, saveMode == 1);
         addRadio(saveModeDefaults, "另存新图", 0, saveMode == 0);
-        addSettingsGroup(root, "编辑后保存方式", saveModeDefaults);
+        addSettingsGroup(root, "保存方式（旋转、压缩共用）", saveModeDefaults);
         saveModeDefaults.setOnCheckedChangeListener((group, checkedId) ->
                 preferences.edit().putInt(PREF_DEFAULT_SAVE_MODE, selectedInt(saveModeDefaults)).apply());
 
         RadioGroup timestampDefaults = new RadioGroup(this);
         timestampDefaults.setOrientation(RadioGroup.VERTICAL);
         int timestamp = preferences.getInt(PREF_DEFAULT_TIMESTAMP, 0);
-        addRadio(timestampDefaults, "不改时间戳", 0, timestamp == 0);
-        addRadio(timestampDefaults, "更新时间戳", 1, timestamp == 1);
-        addSettingsGroup(root, "覆盖后图片时间是否更新", timestampDefaults);
+        addRadio(timestampDefaults, "保持原修改时间", 0, timestamp == 0);
+        addRadio(timestampDefaults, "更新为当前时间", 1, timestamp == 1);
+        addSettingsGroup(root, "覆盖后的修改时间（不改变拍摄时间）", timestampDefaults);
         timestampDefaults.setOnCheckedChangeListener((group, checkedId) ->
                 preferences.edit().putInt(PREF_DEFAULT_TIMESTAMP, selectedInt(timestampDefaults)).apply());
 
@@ -742,7 +889,7 @@ public class MainActivity extends AppCompatActivity {
         updatedPhotoSources.keySet().retainAll(selected);
         statusText.setTextColor(COLOR_MUTED);
         selectionText.setText(selected.isEmpty() ? "尚未选择照片" : "已选择 " + selected.size() + " 张照片");
-        rotateButton.setEnabled(!selected.isEmpty());
+        processButton.setEnabled(!selected.isEmpty());
         if (selected.size() <= 8) previewExpanded = false;
         showSelectionPreview();
         statusText.setText("");
@@ -905,9 +1052,9 @@ public class MainActivity extends AppCompatActivity {
     @Override protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_MEDIA_MANAGEMENT) {
-            boolean resumeRotation = resumeRotationAfterMediaManagement;
-            resumeRotationAfterMediaManagement = false;
-            if (resumeRotation && pendingItems != null) {
+            boolean resumeProcessing = resumeProcessingAfterMediaManagement;
+            resumeProcessingAfterMediaManagement = false;
+            if (resumeProcessing && pendingItems != null) {
                 requestOverwritePermission(pendingItems, false);
             } else if (currentPage == PAGE_SETTINGS) {
                 showSettingsScreen();
@@ -946,13 +1093,16 @@ public class MainActivity extends AppCompatActivity {
         }
         if (requestCode == REQUEST_ORIGINAL_PHOTOS) {
             if (resultCode == RESULT_OK) continueAfterReadPermission();
-            else statusText.setText("需要照片读取和位置信息权限才能保留 EXIF。");
+            else {
+                restoreControls();
+                statusText.setText("需要照片读取和位置信息权限才能保留 EXIF。");
+            }
             return;
         }
         if (requestCode == REQUEST_OVERWRITE_PERMISSION) {
             if (resultCode == RESULT_OK && pendingItems != null) {
                 processSelection(pendingItems, pendingDegrees, true,
-                        selectedInt(overwriteTimestampGroup) == 1);
+                        pendingUpdateTimestamp);
             } else {
                 restoreControls();
                 statusText.setText("未获准覆盖照片，原图没有修改。");
@@ -960,8 +1110,15 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void beginRotation() {
-        if (selected.isEmpty()) return;
+    private void beginProcessing() {
+        if (processing || selected.isEmpty()) return;
+        pendingItems = new ArrayList<>(selected);
+        pendingCompression = isCompressionMode();
+        pendingQuality = selectedInt(qualityGroup);
+        pendingUpdateTimestamp = selectedInt(overwriteTimestampGroup) == 1;
+        processing = true;
+        setEditingEnabled(false);
+        showSelectionPreview();
         pendingDegrees = selectedInt(directionGroup);
         pendingOverwrite = selectedInt(saveModeGroup) == 1;
         boolean needsOriginalMediaAccess = pendingOverwrite;
@@ -993,7 +1150,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void continueAfterReadPermission() {
-        ArrayList<Uri> items = new ArrayList<>(selected);
+        ArrayList<Uri> items = pendingItems == null ? new ArrayList<>(selected) : new ArrayList<>(pendingItems);
         if (pendingOverwrite) requestOverwritePermission(items);
         else processSelection(items, pendingDegrees, false, false);
     }
@@ -1002,17 +1159,17 @@ public class MainActivity extends AppCompatActivity {
         requestOverwritePermission(pickerItems, true);
     }
 
-    private void openMediaManagementSettings(boolean resumeRotation) {
+    private void openMediaManagementSettings(boolean resumeProcessing) {
         if (Build.VERSION.SDK_INT < 31) return;
-        resumeRotationAfterMediaManagement = resumeRotation;
+        resumeProcessingAfterMediaManagement = resumeProcessing;
         defaultPreferences().edit().putBoolean(PREF_MEDIA_MANAGEMENT_OFFERED, true).apply();
         try {
             Intent intent = new Intent(Settings.ACTION_REQUEST_MANAGE_MEDIA,
                     Uri.parse("package:" + getPackageName()));
             startActivityForResult(intent, REQUEST_MEDIA_MANAGEMENT);
         } catch (ActivityNotFoundException | SecurityException e) {
-            resumeRotationAfterMediaManagement = false;
-            if (resumeRotation && pendingItems != null) requestOverwritePermission(pendingItems, false);
+            resumeProcessingAfterMediaManagement = false;
+            if (resumeProcessing && pendingItems != null) requestOverwritePermission(pendingItems, false);
             else Toast.makeText(this, "系统未提供媒体管理授权入口", Toast.LENGTH_SHORT).show();
         }
     }
@@ -1031,11 +1188,7 @@ public class MainActivity extends AppCompatActivity {
         ArrayList<Uri> sources = new ArrayList<>();
         for (Uri uri : pickerItems) sources.add(updatedPhotoSources.getOrDefault(uri, uri));
         processing = true;
-        rotateButton.setEnabled(false);
-        chooseButton.setEnabled(false);
-        setGroupEnabled(directionGroup, false);
-        setGroupEnabled(saveModeGroup, false);
-        setGroupEnabled(overwriteTimestampGroup, false);
+        setEditingEnabled(false);
         showSelectionPreview();
         progress.setVisibility(View.VISIBLE);
         progress.setMax(pickerItems.size());
@@ -1056,22 +1209,22 @@ public class MainActivity extends AppCompatActivity {
                         pendingItems = pickerItems;
                         if (mediaItems.isEmpty()) {
                             processSelection(pickerItems, pendingDegrees, true,
-                                    selectedInt(overwriteTimestampGroup) == 1);
+                                    pendingUpdateTimestamp);
                             return;
                         }
                         if (requestMediaManagement && Build.VERSION.SDK_INT >= 31
                                 && !defaultPreferences().getBoolean(PREF_MEDIA_MANAGEMENT_OFFERED, false)
                                 && !MediaStore.canManageMedia(this)) {
                             progress.setVisibility(View.GONE);
-                            statusText.setText("开启系统的媒体管理授权后，旋转照片无需再次确认。返回后继续旋转。");
-                            Toast.makeText(this, "开启媒体管理授权，之后旋转无需再次确认", Toast.LENGTH_LONG).show();
+                            statusText.setText("开启系统的媒体管理授权后，覆盖照片无需再次确认。返回后继续处理。");
+                            Toast.makeText(this, "开启媒体管理授权，之后覆盖无需再次确认", Toast.LENGTH_LONG).show();
                             openMediaManagementSettings(true);
                             return;
                         }
                         PendingIntent request = MediaStore.createWriteRequest(getContentResolver(), mediaItems);
                         progress.setVisibility(View.GONE);
                         statusText.setText(Build.VERSION.SDK_INT >= 31 && MediaStore.canManageMedia(this)
-                                ? "正在准备旋转…" : "等待系统授权修改照片…");
+                                ? "正在准备处理…" : "等待系统授权修改照片…");
                         startIntentSenderForResult(request.getIntentSender(), REQUEST_OVERWRITE_PERMISSION,
                                 null, 0, 0, 0);
                     } catch (IntentSender.SendIntentException | RuntimeException e) {
@@ -1110,68 +1263,99 @@ public class MainActivity extends AppCompatActivity {
         processing = true;
         previewExpanded = false;
         showSelectionPreview();
-        rotateButton.setEnabled(false);
-        chooseButton.setEnabled(false);
-        directionGroup.setEnabled(false);
-        saveModeGroup.setEnabled(false);
-        overwriteTimestampGroup.setEnabled(false);
+        setEditingEnabled(false);
         progress.setVisibility(View.VISIBLE);
         progress.setMax(items.size());
         progress.setProgress(0);
         statusText.setText("准备处理 " + items.size() + " 张照片…");
         statusText.setTextColor(COLOR_MUTED);
+        final boolean compress = pendingCompression;
+        final int quality = pendingQuality;
         worker.execute(() -> {
             int success = 0;
+            int skipped = 0;
+            long beforeBytes = 0;
+            long afterBytes = 0;
             List<String> failures = new ArrayList<>();
+            List<String> skipDetails = new ArrayList<>();
             Map<Uri, Uri> overwrittenSources = new HashMap<>();
             for (int i = 0; i < items.size(); i++) {
                 try {
-                    if (overwrite) {
-                        Uri updatedSource = ExifRotation.overwrite(this, sources.get(i), degrees, updateTimestamp);
-                        overwrittenSources.put(items.get(i), updatedSource);
-                    } else ExifRotation.saveCopy(this, sources.get(i), degrees);
-                    success++;
-                } catch (Exception e) {
-                    Log.e("PhotoRotator", "Failed to rotate photo " + (i + 1), e);
-                    failures.add((i + 1) + "：" + (e.getMessage() == null ? "旋转失败" : e.getMessage()));
+                    if (compress) {
+                        ExifRotation.CompressionResult result = ExifRotation.compress(this, sources.get(i),
+                                quality, overwrite, updateTimestamp);
+                        if (result.skipReason != null) {
+                            skipped++;
+                            skipDetails.add((i + 1) + "：" + result.skipReason);
+                        } else {
+                            if (overwrite) overwrittenSources.put(items.get(i), result.destination);
+                            success++;
+                        }
+                        beforeBytes += result.originalBytes;
+                        afterBytes += result.compressedBytes;
+                    } else {
+                        if (overwrite) {
+                            Uri updatedSource = ExifRotation.overwrite(this, sources.get(i), degrees, updateTimestamp);
+                            overwrittenSources.put(items.get(i), updatedSource);
+                        } else ExifRotation.saveCopy(this, sources.get(i), degrees);
+                        success++;
+                    }
+                } catch (Exception | OutOfMemoryError e) {
+                    Log.e("PhotoRotator", "Failed to process photo " + (i + 1), e);
+                    String message = e instanceof OutOfMemoryError ? "内存不足，无法保持原尺寸处理"
+                            : e.getMessage() == null ? "处理失败" : e.getMessage();
+                    failures.add((i + 1) + "：" + message);
                 }
                 int done = i + 1;
                 int completed = success;
+                int ignored = skipped;
                 runOnUiThread(() -> {
                     progress.setProgress(done);
-                    statusText.setText("处理中 " + done + "/" + items.size() + "（成功 " + completed + "）");
+                    statusText.setText("处理中 " + done + "/" + items.size() + "（成功 " + completed
+                            + (compress ? "，跳过 " + ignored : "") + "）");
                 });
             }
             int completed = success;
-            List<String> errors = failures;
+            int ignored = skipped;
+            long originalSize = beforeBytes;
+            long compressedSize = afterBytes;
             runOnUiThread(() -> {
                 updatedPhotoSources.putAll(overwrittenSources);
                 for (Uri uri : overwrittenSources.keySet()) thumbnailCache.remove(uri.toString());
                 restoreControls();
-                String summary = errors.isEmpty()
+                String summary = compress
+                        ? "压缩完成：成功 " + completed + " 张，跳过 " + ignored + " 张，失败 " + failures.size() + " 张"
+                        : failures.isEmpty()
                         ? "旋转成功，已" + (overwrite ? "覆盖 " : "另存 ") + completed + " 张照片"
-                        : "处理完成：成功 " + completed + " 张，失败 " + errors.size() + " 张";
+                        : "处理完成：成功 " + completed + " 张，失败 " + failures.size() + " 张";
                 String result = summary;
+                if (compress && originalSize > 0) {
+                    result += "\n体积合计：" + formatBytes(originalSize) + " → " + formatBytes(compressedSize)
+                            + "，节省 " + formatBytes(originalSize - compressedSize)
+                            + "（" + Math.round(100.0 * (originalSize - compressedSize) / originalSize) + "%）";
+                }
                 if (completed > 0) result += overwrite
-                        ? "\n原照片已覆盖，EXIF 信息保留。"
-                        : "\n旋转后的照片已另存到 Pictures/PhotoRotator。";
-                if (!errors.isEmpty()) result += "\n" + String.join("\n", errors);
+                        ? "\n原照片已覆盖，常用 EXIF 信息已保留。"
+                        : "\n处理后的照片已另存到 Pictures/PhotoRotator。";
+                if (!skipDetails.isEmpty()) result += "\n跳过（原图未修改）：\n" + String.join("\n", skipDetails);
+                if (!failures.isEmpty()) result += "\n失败：\n" + String.join("\n", failures);
                 statusText.setText(result);
-                statusText.setTextColor(errors.isEmpty() ? 0xFF2E7D32
-                        : completed > 0 ? 0xFF9C6500 : 0xFFBA1A1A);
+                statusText.setTextColor(failures.isEmpty() ? 0xFF2E7D32
+                        : completed > 0 || ignored > 0 ? 0xFF9C6500 : 0xFFBA1A1A);
                 Toast.makeText(this, summary, Toast.LENGTH_SHORT).show();
             });
         });
     }
 
+    private String formatBytes(long bytes) {
+        return android.text.format.Formatter.formatShortFileSize(this, bytes);
+    }
+
     private void restoreControls() {
         processing = false;
         progress.setVisibility(View.GONE);
-        rotateButton.setEnabled(!selected.isEmpty());
-        chooseButton.setEnabled(true);
-        setGroupEnabled(directionGroup, true);
-        setGroupEnabled(saveModeGroup, true);
-        setGroupEnabled(overwriteTimestampGroup, true);
+        pendingItems = null;
+        setEditingEnabled(true);
         showSelectionPreview();
     }
 
